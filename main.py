@@ -1,14 +1,15 @@
 """
 Direktor EXE – Scrabble Tournament Manager
-Full Updated main.py
+Full Updated main.py (No Firebase)
 
-New Features:
-  1. A single toggle button now switches between General (default) and Team Round Robin modes.
-  2. In General mode, if “Round Robin” is selected, the user is informed of the full schedule size and is prompted for how many rounds to play. The pairing schedule is then generated accordingly.
-  3. The HTML output index page now lists separate links for each paired round (instead of one pairings link).
-  4. The “Next game” column has been removed from the standings.
-  5. The player scorecard now shows a table with round number, result, and cumulative spread.
-  6. In General mode, the team dropdown is hidden on the player registration screen.
+Features:
+  • Modes: General and Team Round Robin (toggle button).
+  • Tournament Setup with tournament name, date, and venue.
+  • Automatic generation of a tournament folder based on the tournament name inside the "rendered" folder.
+  • The generated HTML file is automatically copied as index.html in that folder.
+  • Automatic deployment using FTP to your own web server.
+  • Shareable URLs are built using your custom domain (e.g. https://www.yourwebsite.com/tournaments/…).
+  • Pairing, results entry, and other features remain as before.
 
 Author: Manuelito
 """
@@ -18,6 +19,8 @@ Author: Manuelito
 #####################################
 import customtkinter as ctk
 import os
+import re
+import shutil
 import webbrowser
 import sqlite3
 import threading
@@ -27,6 +30,8 @@ import socket
 import random
 from functools import partial
 import json
+import subprocess
+import ftplib
 import tkinter.filedialog as fd
 import tkinter.messagebox as messagebox
 import tkinter.simpledialog as simpledialog
@@ -36,6 +41,77 @@ from data.database import (
     create_connection, create_tables, insert_player,
     insert_tournament, get_all_tournaments, get_all_players
 )
+
+#####################################
+# Helper Functions for Folder & File Finalization
+#####################################
+def sanitize_tournament_name(name):
+    """Remove invalid filename characters and replace spaces with underscores."""
+    sanitized = re.sub(r'[\\/*?:"<>|]', "", name)
+    return sanitized.replace(" ", "_")
+
+def finalize_tournament_html(tournament_name, generated_filename):
+    """
+    Automatically creates a subfolder in the "rendered" directory based on the tournament name,
+    and copies the generated HTML file there as index.html.
+    Returns the relative path of the new index.html file.
+    """
+    rendered_dir = os.path.join(os.getcwd(), "rendered")
+    folder_name = sanitize_tournament_name(tournament_name)
+    tournament_folder = os.path.join(rendered_dir, folder_name)
+    os.makedirs(tournament_folder, exist_ok=True)
+    dest_file = os.path.join(tournament_folder, "index.html")
+    shutil.copyfile(generated_filename, dest_file)
+    return f"{folder_name}/index.html"
+
+#####################################
+# Automatic Deployment via FTP
+#####################################
+def ftp_deploy(local_folder, ftp_host, ftp_user, ftp_pass, remote_folder):
+    """
+    Deploys the contents of local_folder to the remote_folder on the FTP server.
+    """
+    ftp = ftplib.FTP(ftp_host)
+    ftp.login(ftp_user, ftp_pass)
+    # Change to the remote folder; create it if necessary.
+    try:
+        ftp.cwd(remote_folder)
+    except ftplib.error_perm:
+        ftp.mkd(remote_folder)
+        ftp.cwd(remote_folder)
+    # Walk through the local folder and upload files
+    for root, dirs, files in os.walk(local_folder):
+        rel_path = os.path.relpath(root, local_folder)
+        if rel_path != ".":
+            try:
+                ftp.mkd(rel_path)
+            except Exception:
+                pass
+            ftp.cwd(rel_path)
+        for file in files:
+            local_file_path = os.path.join(root, file)
+            with open(local_file_path, 'rb') as f:
+                ftp.storbinary(f"STOR {file}", f)
+        # Return to remote_folder after processing this directory
+        if rel_path != ".":
+            ftp.cwd("..")
+    ftp.quit()
+
+def auto_deploy_remote(tournament_folder):
+    """
+    Automatically deploys the tournament folder (inside "rendered") to your web server via FTP.
+    Update the FTP credentials below as necessary.
+    """
+    ftp_host = "ftp.yourwebsite.com"            # Your FTP host address
+    ftp_user = "your_username"                  # Your FTP username
+    ftp_pass = "your_password"                  # Your FTP password
+    remote_folder = "/public_html/tournaments"   # The remote directory on your server
+    try:
+        print("Starting automatic FTP deployment...")
+        ftp_deploy(tournament_folder, ftp_host, ftp_user, ftp_pass, remote_folder)
+        print("Deployment successful.")
+    except Exception as e:
+        print("Deployment failed:", e)
 
 #####################################
 # Global Variables and Mode Settings
@@ -54,15 +130,15 @@ current_mode_view = "general"      # "general" or "team"
 teams_list = []                   # For team mode only
 team_size = 0                     # For team mode only (3 or 5)
 
-# For pairing in General mode, the dropdown now includes "Round Robin", "Random Pairing", and "King of the Hills Pairing"
+# Pairing system options in General mode:
 last_pairing_system = "Round Robin"
 last_team_size = 3              
 
 current_round_number = 0    # Latest round paired
 completed_rounds = {}       # Dict mapping round number -> list of pairings for that round
-results_by_round = {}       # Dict mapping round number -> list of (score1, score2) for each pairing
+results_by_round = {}       # Dict mapping round number -> list of (score1, score2) tuples
 
-team_round_results = {}     # For team mode (if needed)
+team_round_results = {}     # For team mode if needed
 
 app = None                  # Main application window
 status_label = None         # Status bar label
@@ -142,7 +218,10 @@ def initialize_database():
 def get_players_for_tournament(tournament_id):
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, rating, wins, losses, spread, last_result, scorecard, team FROM players WHERE tournament_id = ?", (tournament_id,))
+    cursor.execute(
+        "SELECT id, name, rating, wins, losses, spread, last_result, scorecard, team FROM players WHERE tournament_id = ?",
+        (tournament_id,)
+    )
     players = cursor.fetchall()
     conn.close()
     return players
@@ -483,7 +562,8 @@ def generate_player_scorecard_html(player, tournament_id):
 def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     """
     Generates rebranded HTML pages using Bootstrap 5.
-    Pairing round pages are generated individually, and the index lists links for each paired round.
+    It creates an index page that links to individual pairing round pages.
+    IMPORTANT: This function writes files locally and returns the local file path of the index page.
     """
     rendered_dir = os.path.join(os.getcwd(), "rendered")
     if not os.path.exists(rendered_dir):
@@ -501,18 +581,20 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     
     players = get_players_for_tournament(tournament_id)
     
+    # Use paired rounds if available; otherwise, generate schedule
     if completed_rounds:
         schedule = [completed_rounds[r] for r in sorted(completed_rounds.keys())]
     else:
         schedule = generate_pairings_system(players, system=last_pairing_system)
     
-    # Build pairing round pages and collect links
     pairing_round_links = []
     base = f"tournament_{tournament_id}"
     index_file = f"{base}_index.html"
     roster_file = f"{base}_roster.html"
     standings_file = f"{base}_standings.html"
     prize_file = f"{base}_prize.html"
+    
+    # Generate pairing round pages
     for idx, round_pairings in enumerate(schedule, start=1):
         round_file = f"{base}_pairings_round_{idx}.html"
         pairing_round_links.append((idx, round_file))
@@ -536,7 +618,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
                 pairing_str = f"{p1} vs {p2}"
             pairing_content += f"<tr><td>{i}</td><td>{pairing_str}</td><td>{first}</td></tr>\n"
         pairing_content += "</tbody></table>"
-        # Define header, navbar, footer as local functions
+        
         def header_html():
             return f"""
     <head>
@@ -574,6 +656,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     """
         def footer_section():
             return '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
+        
         pairing_page = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html()}
@@ -592,7 +675,10 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         with open(os.path.join(rendered_dir, round_file), "w", encoding="utf-8") as f:
             f.write(pairing_page)
     
-    # Build header, navbar, footer for other pages
+    # Build index page with links for each pairing round
+    round_links_html = ""
+    for r, link in pairing_round_links:
+        round_links_html += f"<li class='list-group-item'><a href='{link}'>Pairings: Round {r}</a></li>\n"
     def header_html():
         return f"""
     <head>
@@ -631,10 +717,6 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     def footer_section():
         return '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
     
-    # INDEX PAGE: List links for each pairing round
-    round_links_html = ""
-    for r, link in pairing_round_links:
-        round_links_html += f"<li class='list-group-item'><a href='{link}'>Pairings: Round {r}</a></li>\n"
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html()}
@@ -656,7 +738,8 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
 </body>
 </html>
 """
-    with open(os.path.join(rendered_dir, index_file), "w", encoding="utf-8") as f:
+    index_path = os.path.join(rendered_dir, index_file)
+    with open(index_path, "w", encoding="utf-8") as f:
         f.write(index_html)
     
     # PLAYER ROSTER PAGE
@@ -681,10 +764,11 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
 </body>
 </html>
 """
-    with open(os.path.join(rendered_dir, roster_file), "w", encoding="utf-8") as f:
+    roster_path = os.path.join(rendered_dir, roster_file)
+    with open(roster_path, "w", encoding="utf-8") as f:
         f.write(roster_html)
     
-    # STANDINGS PAGE (no Next game column)
+    # STANDINGS PAGE
     standings_rows = ""
     sorted_players = sorted(players, key=lambda x: (x[3], x[5]), reverse=True)
     for rank, player in enumerate(sorted_players, start=1):
@@ -698,7 +782,9 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
   <div class="container container-custom">
     <h1 class="mb-3">Standings - {tournament_name_db}</h1>
     <table class="table table-hover">
-      <thead><tr><th>Rank</th><th>Name</th><th>Wins</th><th>Losses</th><th>Spread</th><th>Last result</th></tr></thead>
+      <thead>
+        <tr><th>Rank</th><th>Name</th><th>Wins</th><th>Losses</th><th>Spread</th><th>Last result</th></tr>
+      </thead>
       <tbody>{standings_rows}</tbody>
     </table>
     <a href="{index_file}" class="btn btn-secondary">Back to Index</a>
@@ -708,7 +794,8 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
 </body>
 </html>
 """
-    with open(os.path.join(rendered_dir, standings_file), "w", encoding="utf-8") as f:
+    standings_path = os.path.join(rendered_dir, standings_file)
+    with open(standings_path, "w", encoding="utf-8") as f:
         f.write(standings_html)
     
     # PRIZE TABLE PAGE
@@ -736,13 +823,17 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
 </body>
 </html>
 """
-    with open(os.path.join(rendered_dir, prize_file), "w", encoding="utf-8") as f:
+    prize_path = os.path.join(rendered_dir, prize_file)
+    with open(prize_path, "w", encoding="utf-8") as f:
         f.write(prize_html)
     
-    start_http_server(HTTP_PORT)
-    ip = get_local_ip()
-    url = f"http://{ip}:{HTTP_PORT}/{index_file}"
-    return url
+    # After generating all files, automatically deploy the tournament folder via FTP.
+    # The tournament folder is the subfolder inside "rendered" based on the tournament name.
+    tournament_folder = os.path.join(rendered_dir, sanitize_tournament_name(tournament_name))
+    auto_deploy_remote(tournament_folder)
+    
+    # Return the local index file path
+    return index_path
 
 #####################################
 # Unified Results Entry (with Edit Capability)
@@ -873,115 +964,6 @@ def setup_enter_results(tab_frame):
     load_rounds()
     refresh_button = ctk.CTkButton(tab_frame, text="Reload Rounds", command=load_rounds)
     refresh_button.pack(pady=5)
-
-#####################################
-# Prize Table Function
-#####################################
-def setup_prize_table(tab_frame):
-    global prize_table
-    label = ctk.CTkLabel(tab_frame, text="Prize Table", font=("Arial", 18))
-    label.pack(pady=10)
-    prize_name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Prize Name")
-    prize_name_entry.pack(pady=5)
-    prize_type_var = ctk.StringVar(value="Monetary")
-    prize_type_menu = ctk.CTkOptionMenu(tab_frame, variable=prize_type_var, values=["Monetary", "Non-Monetary"])
-    prize_type_menu.pack(pady=5)
-    currency_entry = ctk.CTkEntry(tab_frame, placeholder_text="Currency (e.g., USD)")
-    currency_entry.pack(pady=5)
-    amount_entry = ctk.CTkEntry(tab_frame, placeholder_text="Amount or Description")
-    amount_entry.pack(pady=5)
-    prize_list_text = ctk.CTkTextbox(tab_frame, width=400, height=200)
-    prize_list_text.pack(pady=10)
-    prize_list_text.insert("end", "Current Prizes:\n")
-    prize_list_text.configure(state="disabled")
-    def update_prize_list():
-        prize_list_text.configure(state="normal")
-        prize_list_text.delete("1.0", "end")
-        prize_list_text.insert("end", "Current Prizes:\n")
-        for prize in prize_table:
-            if prize["prize_type"] == "Monetary":
-                prize_list_text.insert("end", f'{prize["prize_name"]}: {prize["currency"]} {prize["amount"]}\n')
-            else:
-                prize_list_text.insert("end", f'{prize["prize_name"]}: {prize["prize_description"]}\n')
-        prize_list_text.configure(state="disabled")
-    def add_prize():
-        name = prize_name_entry.get().strip()
-        ptype = prize_type_var.get()
-        if name == "":
-            show_toast(tab_frame, "Enter prize name.")
-            return
-        if ptype == "Monetary":
-            currency = currency_entry.get().strip()
-            amount = amount_entry.get().strip()
-            if currency == "" or amount == "":
-                show_toast(tab_frame, "Enter currency and amount.")
-                return
-            try:
-                amount = float(amount)
-            except ValueError:
-                show_toast(tab_frame, "Invalid amount.")
-                return
-            prize_table.append({"prize_name": name, "prize_type": ptype, "currency": currency, "amount": amount})
-        else:
-            description = amount_entry.get().strip()
-            prize_table.append({"prize_name": name, "prize_type": ptype, "prize_description": description})
-        update_prize_list()
-        prize_name_entry.delete(0, "end")
-        currency_entry.delete(0, "end")
-        amount_entry.delete(0, "end")
-    add_prize_button = ctk.CTkButton(tab_frame, text="Add Prize", command=add_prize)
-    add_prize_button.pack(pady=5)
-    def save_tab():
-        show_toast(tab_frame, "Tab data saved.")
-    tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
-    tab_save_button.pack(pady=5)
-
-#####################################
-# Reports Function
-#####################################
-def setup_reports(tab_frame):
-    label = ctk.CTkLabel(tab_frame, text="Reports & Exports", font=("Arial", 18))
-    label.pack(pady=10)
-    info_label = ctk.CTkLabel(tab_frame, text="Report generation functionality coming soon!", font=("Arial", 14))
-    info_label.pack(pady=10)
-
-#####################################
-# Render Function
-#####################################
-def setup_render(tab_frame):
-    global current_tournament_id, app
-    label = ctk.CTkLabel(tab_frame, text="Render Current Tournament", font=("Arial", 18))
-    label.pack(pady=10)
-    def render_current_tournament():
-        if current_tournament_id is None:
-            show_toast(tab_frame, "No current tournament available.")
-            return
-        conn = create_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, date, venue FROM tournaments WHERE id = ?", (current_tournament_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if result is None:
-            show_toast(tab_frame, "Tournament details not found.")
-            return
-        tournament_name, tournament_date, tournament_venue = result
-        try:
-            url = generate_tournament_html(current_tournament_id, tournament_name, tournament_date)
-        except Exception as e:
-            messagebox.showerror("Render Error", f"An error occurred during rendering: {e}")
-            return
-        webbrowser.open(url)
-    render_button = ctk.CTkButton(tab_frame, text="Render Current Tournament", command=render_current_tournament)
-    render_button.pack(pady=10)
-
-#####################################
-# Placeholder for Team Results UI
-#####################################
-def setup_team_results_ui(tab_frame):
-    label = ctk.CTkLabel(tab_frame, text="Team Results Entry (Placeholder)", font=("Arial", 18))
-    label.pack(pady=10)
-    info = ctk.CTkLabel(tab_frame, text="Team results entry functionality coming soon!", font=("Arial", 14))
-    info.pack(pady=10)
 
 #####################################
 # UI Tab Building Functions
@@ -1124,10 +1106,13 @@ def setup_tournament_setup(tab_frame):
             current_round_number = 0
             completed_rounds.clear()
             results_by_round.clear()
-            link = generate_tournament_html(tournament_id, name, date)
-            update_tournament_link(tournament_id, link)
-            show_toast(tab_frame, f"Tournament '{name}' created. Link: {link}")
-            print(f"Tournament '{name}' created with ID {tournament_id}. Link: {link}")
+            generated_file = generate_tournament_html(tournament_id, name, date)
+            relative_path = finalize_tournament_html(name, generated_file)
+            # Build shareable URL using your own domain
+            shareable_url = f"https://www.yourwebsite.com/tournaments/{relative_path}"
+            update_tournament_link(tournament_id, shareable_url)
+            show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_url}")
+            print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_url}")
             update_status()
         else:
             show_toast(tab_frame, "Failed to create tournament.")
@@ -1219,10 +1204,6 @@ def setup_player_registration(tab_frame):
 # Unified Pairings Tab Function
 #####################################
 def setup_pairings(tab_frame):
-    """
-    In General mode, the pairing system dropdown includes "Round Robin",
-    "Random Pairing", and "King of the Hills Pairing".
-    """
     global current_round_number, completed_rounds, last_pairing_system, last_team_size
     label = ctk.CTkLabel(tab_frame, text="Pairings", font=("Arial", 18))
     label.pack(pady=10)
@@ -1474,106 +1455,6 @@ def setup_enter_results(tab_frame):
     load_rounds()
     refresh_button = ctk.CTkButton(tab_frame, text="Reload Rounds", command=load_rounds)
     refresh_button.pack(pady=5)
-
-#####################################
-# Prize Table Function
-#####################################
-def setup_prize_table(tab_frame):
-    global prize_table
-    label = ctk.CTkLabel(tab_frame, text="Prize Table", font=("Arial", 18))
-    label.pack(pady=10)
-    prize_name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Prize Name")
-    prize_name_entry.pack(pady=5)
-    prize_type_var = ctk.StringVar(value="Monetary")
-    prize_type_menu = ctk.CTkOptionMenu(tab_frame, variable=prize_type_var, values=["Monetary", "Non-Monetary"])
-    prize_type_menu.pack(pady=5)
-    currency_entry = ctk.CTkEntry(tab_frame, placeholder_text="Currency (e.g., USD)")
-    currency_entry.pack(pady=5)
-    amount_entry = ctk.CTkEntry(tab_frame, placeholder_text="Amount or Description")
-    amount_entry.pack(pady=5)
-    prize_list_text = ctk.CTkTextbox(tab_frame, width=400, height=200)
-    prize_list_text.pack(pady=10)
-    prize_list_text.insert("end", "Current Prizes:\n")
-    prize_list_text.configure(state="disabled")
-    def update_prize_list():
-        prize_list_text.configure(state="normal")
-        prize_list_text.delete("1.0", "end")
-        prize_list_text.insert("end", "Current Prizes:\n")
-        for prize in prize_table:
-            if prize["prize_type"] == "Monetary":
-                prize_list_text.insert("end", f'{prize["prize_name"]}: {prize["currency"]} {prize["amount"]}\n')
-            else:
-                prize_list_text.insert("end", f'{prize["prize_name"]}: {prize["prize_description"]}\n')
-        prize_list_text.configure(state="disabled")
-    def add_prize():
-        name = prize_name_entry.get().strip()
-        ptype = prize_type_var.get()
-        if name == "":
-            show_toast(tab_frame, "Enter prize name.")
-            return
-        if ptype == "Monetary":
-            currency = currency_entry.get().strip()
-            amount = amount_entry.get().strip()
-            if currency == "" or amount == "":
-                show_toast(tab_frame, "Enter currency and amount.")
-                return
-            try:
-                amount = float(amount)
-            except ValueError:
-                show_toast(tab_frame, "Invalid amount.")
-                return
-            prize_table.append({"prize_name": name, "prize_type": ptype, "currency": currency, "amount": amount})
-        else:
-            description = amount_entry.get().strip()
-            prize_table.append({"prize_name": name, "prize_type": ptype, "prize_description": description})
-        update_prize_list()
-        prize_name_entry.delete(0, "end")
-        currency_entry.delete(0, "end")
-        amount_entry.delete(0, "end")
-    add_prize_button = ctk.CTkButton(tab_frame, text="Add Prize", command=add_prize)
-    add_prize_button.pack(pady=5)
-    def save_tab():
-        show_toast(tab_frame, "Tab data saved.")
-    tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
-    tab_save_button.pack(pady=5)
-
-#####################################
-# Reports Function
-#####################################
-def setup_reports(tab_frame):
-    label = ctk.CTkLabel(tab_frame, text="Reports & Exports", font=("Arial", 18))
-    label.pack(pady=10)
-    info_label = ctk.CTkLabel(tab_frame, text="Report generation functionality coming soon!", font=("Arial", 14))
-    info_label.pack(pady=10)
-
-#####################################
-# Render Function
-#####################################
-def setup_render(tab_frame):
-    global current_tournament_id, app
-    label = ctk.CTkLabel(tab_frame, text="Render Current Tournament", font=("Arial", 18))
-    label.pack(pady=10)
-    def render_current_tournament():
-        if current_tournament_id is None:
-            show_toast(tab_frame, "No current tournament available.")
-            return
-        conn = create_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, date, venue FROM tournaments WHERE id = ?", (current_tournament_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if result is None:
-            show_toast(tab_frame, "Tournament details not found.")
-            return
-        tournament_name, tournament_date, tournament_venue = result
-        try:
-            url = generate_tournament_html(current_tournament_id, tournament_name, tournament_date)
-        except Exception as e:
-            messagebox.showerror("Render Error", f"An error occurred during rendering: {e}")
-            return
-        webbrowser.open(url)
-    render_button = ctk.CTkButton(tab_frame, text="Render Current Tournament", command=render_current_tournament)
-    render_button.pack(pady=10)
 
 #####################################
 # UI Tab Building Functions
