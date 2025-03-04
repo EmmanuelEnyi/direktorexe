@@ -7,17 +7,21 @@ Features:
   • Tournament Setup with tournament name, date, and venue.
   • Automatic generation of a tournament folder (inside “rendered/tournaments”) based on the tournament name.
   • All HTML outputs (index, roster, standings, prize table, pairing pages) are generated into that folder so that relative links work correctly.
-  • An HTTP server is started and shareable URLs are generated using the local IP.
-  • The Enter Results tab uses the same pairing order as generated in the Pairings tab.
+  • An HTTP server is started and shareable URLs are generated using the public IP or domain provided by the user.
+  • The "Enter Results" tab now lets the user manually enter or update match scores for each pairing.
   • The Prize Table tab provides a UI for setting up both monetary and non‑monetary prizes (with a searchable currency selector).
   • The Event Coverage Index is regenerated on demand (when clicking Render) to reflect the latest data.
-  • In the Pairings tab, when the Round Robin system is chosen, a dialog asks the user for the number of rounds to generate;
-    only that many rounds are generated and a complete preview of all rounds and pairings is shown.
-  • In the HTML outputs for pairings, the header displays only the tournament name.
+  • In the Pairings tab, when the Round Robin system is chosen, a dialog asks the user for the number of rounds to generate; the system now generates exactly that many rounds.
+  • The preview box in the Pairings tab shows the entire round robin schedule.
+  • A new "FTP Settings" tab lets the user enter FTP Host, Username, and Password. When the user clicks "Mirror Website", the tournament folder is uploaded via FTP to their host, and the shareable link is updated.
+  • A new remote results submission feature is added:
+       – A custom HTTP endpoint (/submit_results) is served.
+       – Players can access a web form to paste their match ID and submit scores.
+       – The system validates submissions (including duplicate checking) and updates tournament results.
   • A persistent sidebar provides “Save Tournament”, “Load Tournament”, and “Quit App” buttons.
-    – “Save Tournament” saves the complete tournament progress as a .TOU file in the tournament folder.
-    – “Load Tournament” lets the user resume a saved tournament.
-    – “Quit App” exits the application.
+       – “Save Tournament” saves the complete tournament progress as a .TOU file.
+       – “Load Tournament” lets the user resume a saved tournament.
+       – “Quit App” exits the application.
   • Overall UX enhancements include improved layout, clear feedback messages, tooltips, and robust error handling.
   
 Author: Manuelito
@@ -27,7 +31,7 @@ Author: Manuelito
 # Imports and Global Variables
 #############################
 import customtkinter as ctk
-import os, re, shutil, webbrowser, sqlite3, threading, http.server, socketserver, socket, random, json, subprocess, ftplib
+import os, re, shutil, webbrowser, sqlite3, threading, http.server, socketserver, socket, random, json, ftplib
 import tkinter.filedialog as fd
 import tkinter.messagebox as messagebox
 import tkinter.simpledialog as simpledialog
@@ -69,12 +73,13 @@ current_round_number = 0
 completed_rounds = {}
 results_by_round = {}
 team_round_results = {}
-desired_rr_rounds = None  # Set only when using Round Robin in Pairings tab
+desired_rr_rounds = None   # For Round Robin in Pairings
 app = None
 status_label = None
 main_frame_global = None
 shareable_link = ""
 full_round_robin_schedule = None
+public_ip = ""  # Will store public IP or domain
 
 header_html = """<head>
   <meta charset="UTF-8">
@@ -88,9 +93,20 @@ header_html = """<head>
   </style>
 </head>"""
 
-#############################
-# Helper Functions for Folder & File Finalization
-#############################
+##################################
+# Toast Notification Function
+##################################
+def show_toast(parent, message, duration=2000):
+    toast = ctk.CTkToplevel(parent)
+    toast.geometry("300x50+500+300")
+    toast.overrideredirect(True)
+    label = ctk.CTkLabel(toast, text=message, font=("Arial", 12))
+    label.pack(expand=True, fill="both")
+    toast.after(duration, toast.destroy)
+
+##################################
+# Folder & File Helpers
+##################################
 def get_tournament_folder(tournament_name):
     rendered_dir = os.path.join(os.getcwd(), "rendered", "tournaments")
     os.makedirs(rendered_dir, exist_ok=True)
@@ -105,9 +121,9 @@ def finalize_tournament_html(tournament_name, generated_filename):
     shutil.copyfile(generated_filename, dest_file)
     return dest_file
 
-#############################
-# Utility Functions
-#############################
+##################################
+# Utility Function: Get Local IP
+##################################
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -119,71 +135,136 @@ def get_local_ip():
         s.close()
     return ip
 
-def run_http_server(port=HTTP_PORT):
+##################################
+# Custom HTTP Handler for Remote Results Submission
+##################################
+class ResultsSubmissionHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/submit_results"):
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>Submit Match Results</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                input, label { font-size: 16px; margin: 5px; }
+              </style>
+            </head>
+            <body>
+              <h2>Submit Match Results</h2>
+              <form method="POST" action="/submit_results">
+                <label for="match_id">Match ID (e.g., R1-M2):</label><br>
+                <input type="text" id="match_id" name="match_id" required><br><br>
+                <label for="score1">Score for Player 1:</label><br>
+                <input type="number" id="score1" name="score1" required><br><br>
+                <label for="score2">Score for Player 2:</label><br>
+                <input type="number" id="score2" name="score2" required><br><br>
+                <input type="submit" value="Submit Results">
+              </form>
+            </body>
+            </html>
+            """
+            self.wfile.write(html.encode())
+        else:
+            super().do_GET()
+
+    def do_POST(self):
+        if self.path.startswith("/submit_results"):
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            import urllib.parse
+            fields = urllib.parse.parse_qs(post_data.decode())
+            match_id = fields.get('match_id', [None])[0]
+            score1 = fields.get('score1', [None])[0]
+            score2 = fields.get('score2', [None])[0]
+            if not match_id or score1 is None or score2 is None:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"Missing required fields.")
+                return
+            try:
+                score1 = int(score1)
+                score2 = int(score2)
+            except ValueError:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"Scores must be integers.")
+                return
+            try:
+                parts = match_id.split('-')
+                round_part = parts[0]  # e.g., "R1"
+                match_part = parts[1]  # e.g., "M2"
+                round_num = int(round_part[1:])
+                match_index = int(match_part[1:]) - 1  # zero-based index
+            except Exception:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"Invalid match ID format. Use R#-M# format.")
+                return
+            from __main__ import current_tournament_id, completed_rounds, results_by_round, recalc_player_stats
+            if current_tournament_id is None:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"No tournament loaded.")
+                return
+            if round_num not in completed_rounds:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"Round not found.")
+                return
+            round_pairings = completed_rounds[round_num]
+            if match_index < 0 or match_index >= len(round_pairings):
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"Invalid match number.")
+                return
+            if round_num in results_by_round and len(results_by_round[round_num]) > match_index and results_by_round[round_num][match_index] is not None:
+                self.send_response(409)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"Result for this match has already been submitted.")
+                return
+            if round_num not in results_by_round:
+                results_by_round[round_num] = [None] * len(round_pairings)
+            results_by_round[round_num][match_index] = (score1, score2)
+            recalc_player_stats()
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"Result submitted successfully.")
+        else:
+            super().do_POST()
+
+##################################
+# Custom HTTP Server Startup
+##################################
+def run_http_server_custom(port=HTTP_PORT):
     rendered_dir = os.path.join(os.getcwd(), "rendered")
-    handler = partial(http.server.SimpleHTTPRequestHandler, directory=rendered_dir)
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"Serving HTTP at port {port}")
+    handler = partial(ResultsSubmissionHandler, directory=rendered_dir)
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("0.0.0.0", port), handler) as httpd:
+        print(f"Serving HTTP at port {port} with remote submission enabled")
         httpd.serve_forever()
 
-def start_http_server(port=HTTP_PORT):
+def start_http_server_custom(port=HTTP_PORT):
     global server_thread
     if server_thread is None:
-        server_thread = threading.Thread(target=run_http_server, args=(port,), daemon=True)
+        server_thread = threading.Thread(target=run_http_server_custom, args=(port,), daemon=True)
         server_thread.start()
 
-def show_toast(parent, message, duration=2000):
-    toast = ctk.CTkToplevel(parent)
-    toast.geometry("300x50+500+300")
-    toast.overrideredirect(True)
-    label = ctk.CTkLabel(toast, text=message, font=("Arial", 12))
-    label.pack(expand=True, fill="both")
-    toast.after(duration, toast.destroy)
-
-def update_status():
-    global status_label, current_tournament_id
-    if status_label:
-        if current_tournament_id is not None:
-            conn = create_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM tournaments WHERE id = ?", (current_tournament_id,))
-            result = cursor.fetchone()
-            conn.close()
-            status_label.configure(text=result[0] if result else "No tournament loaded.")
-        else:
-            status_label.configure(text="No tournament loaded.")
-
-def confirm_discard():
-    global current_tournament_id, app
-    if current_tournament_id is not None:
-        ans = messagebox.askyesnocancel("Confirm", "Do you want to save the current tournament before proceeding?")
-        if ans is None:
-            return False
-        if ans:
-            save_current_tournament()
-    return True
-
-def quit_app():
-    global app
-    if messagebox.askyesnocancel("Confirm Quit", "Are you sure you want to quit?"):
-        app.destroy()
-
-#############################
-# Database Functions
-#############################
-def initialize_database():
-    conn = create_connection()
-    create_tables(conn)
-    conn.close()
-
-def get_players_for_tournament(tournament_id):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, rating, wins, losses, spread, last_result, scorecard, team FROM players WHERE tournament_id = ?", (tournament_id,))
-    players = cursor.fetchall()
-    conn.close()
-    return players
-
+##################################
+# Database and Save/Load Functions
+##################################
 def update_tournament_link(tournament_id, link):
     conn = create_connection()
     cursor = conn.cursor()
@@ -191,9 +272,6 @@ def update_tournament_link(tournament_id, link):
     conn.commit()
     conn.close()
 
-#############################
-# Save/Load Tournament Functions
-#############################
 def save_current_tournament():
     global current_tournament_id, app, tournament_mode, teams_list, team_size, current_round_number, completed_rounds, results_by_round, last_pairing_system, last_team_size
     if current_tournament_id is None:
@@ -258,7 +336,7 @@ def load_tournament():
         teams_list = tournament.get("teams", [])
         team_size = tournament.get("team_size", 0)
         session_players = [(p["name"], p["rating"], p["wins"], p["losses"], p["spread"],
-                            p.get("last_result", ""), p.get("scorecard", ""), p.get("team", "")) for p in players]
+                             p.get("last_result", ""), p.get("scorecard", ""), p.get("team", "")) for p in players]
         current_round_number = progress.get("current_round_number", 0)
         completed_rounds = progress.get("completed_rounds", {})
         results_by_round = progress.get("results_by_round", {})
@@ -267,9 +345,47 @@ def load_tournament():
         show_toast(app, "Tournament loaded successfully.")
         update_status()
 
-#############################
-# Scorecard & Results Helpers
-#############################
+def update_status():
+    global status_label, current_tournament_id
+    if status_label:
+        if current_tournament_id is not None:
+            conn = create_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM tournaments WHERE id = ?", (current_tournament_id,))
+            result = cursor.fetchone()
+            conn.close()
+            status_label.configure(text=result[0] if result else "No tournament loaded.")
+        else:
+            status_label.configure(text="No tournament loaded.")
+
+def confirm_discard():
+    global current_tournament_id, app
+    if current_tournament_id is not None:
+        ans = messagebox.askyesnocancel("Confirm", "Do you want to save the current tournament before proceeding?")
+        if ans is None:
+            return False
+        if ans:
+            save_current_tournament()
+    return True
+
+def quit_app():
+    global app
+    if messagebox.askyesnocancel("Confirm Quit", "Are you sure you want to quit?"):
+        app.destroy()
+
+def initialize_database():
+    conn = create_connection()
+    create_tables(conn)
+    conn.close()
+
+def get_players_for_tournament(tournament_id):
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, rating, wins, losses, spread, last_result, scorecard, team FROM players WHERE tournament_id = ?", (tournament_id,))
+    players = cursor.fetchall()
+    conn.close()
+    return players
+
 def get_player_id_by_name(tournament_id, name):
     conn = create_connection()
     cursor = conn.cursor()
@@ -328,9 +444,9 @@ def recalc_player_stats():
     conn.commit()
     conn.close()
 
-#############################
+##################################
 # Pairing System Functions
-#############################
+##################################
 def round_robin_rounds(players):
     players = players[:]
     if len(players) % 2 == 1:
@@ -505,17 +621,17 @@ def generate_general_pairings(players, system_choice):
         names = [p[1] for p in players]
         full_round_robin_schedule = assign_firsts(round_robin_rounds(names))
         global desired_rr_rounds, current_round_number, completed_rounds
-        if desired_rr_rounds is None:
-            desired_rr_rounds = simpledialog.askinteger("Round Robin Schedule",
-                f"A full round robin schedule for {len(players)} players is completed in {len(full_round_robin_schedule)} rounds.\nHow many rounds do you want to generate?",
-                minvalue=1, maxvalue=len(full_round_robin_schedule))
-            for r in range(1, desired_rr_rounds+1):
-                completed_rounds[r] = full_round_robin_schedule[r-1]
-            current_round_number = desired_rr_rounds
-            return full_round_robin_schedule[desired_rr_rounds - 1]
-        else:
-            messagebox.showerror("Error", "Full round robin schedule already generated. Please select an existing round.")
-            return None
+        max_rounds = len(full_round_robin_schedule)
+        desired_rr_rounds = simpledialog.askinteger(
+            "Round Robin Schedule",
+            f"A full round robin schedule for {len(players)} players is completed in {max_rounds} rounds.\nHow many rounds do you want to generate?",
+            minvalue=1,
+            maxvalue=max_rounds
+        )
+        for r in range(1, desired_rr_rounds + 1):
+            completed_rounds[r] = full_round_robin_schedule[r - 1]
+        current_round_number = desired_rr_rounds
+        return full_round_robin_schedule[desired_rr_rounds - 1]
     elif system_choice == "Random Pairing":
         return random_pairings(players)
     elif system_choice == "King of the Hills Pairing":
@@ -533,9 +649,9 @@ def generate_pairings_system(players, system="Round Robin", team_size=None):
     else:
         return generate_general_pairings(players, system)
 
-#############################
-# HTML Generation Functions (Render Feature Fix)
-#############################
+##################################
+# HTML Generation Functions
+##################################
 def generate_player_scorecard_html(player, tournament_id, out_folder):
     player_id = player[0]
     try:
@@ -597,8 +713,9 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     for idx, round_pairings in enumerate(schedule, start=1):
         round_file = f"{base}_pairings_round_{idx}.html"
         pairing_round_links.append((idx, round_file))
-        pairing_content = f"<h2>Round {idx} Pairings</h2>\n<table class='table table-bordered'><thead><tr><th>#</th><th>Pairing</th><th>First</th></tr></thead><tbody>"
+        pairing_content = f"<h2>Round {idx} Pairings</h2>\n<table class='table table-bordered'><thead><tr><th>#</th><th>Pairing</th><th>First</th><th>Match ID</th></tr></thead><tbody>"
         for i, pairing in enumerate(round_pairings, start=1):
+            match_id = f"R{idx}-M{i}"
             if tournament_mode == "Team Round Robin":
                 pairing_str = "Team pairings not implemented."
                 first = "N/A"
@@ -611,9 +728,8 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
                 else:
                     p1, p2, first = "???", "???", "???"
                 pairing_str = f"{p1} vs {p2}"
-            pairing_content += f"<tr><td>{i}</td><td>{pairing_str}</td><td>{first}</td></tr>\n"
+            pairing_content += f"<tr><td>{i}</td><td>{pairing_str}</td><td>{first}</td><td>{match_id} <button onclick='navigator.clipboard.writeText(\"{match_id}\")'>Copy</button></td></tr>"
         pairing_content += "</tbody></table>"
-        # Header shows only the tournament name
         navbar_html = f"""<nav class="navbar navbar-expand-lg navbar-light bg-light mb-4">
   <div class="container">
     <a class="navbar-brand" href="./{index_file}"></a>
@@ -769,6 +885,8 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
       <li class="list-group-item"><a href="./{standings_file}">Standings</a></li>
       <li class="list-group-item"><a href="./{prize_file}">Prize Table</a></li>
     </ul>
+    <br>
+    <a href="/submit_results" class="btn btn-primary">Submit Results</a>
   </div>
   {footer_section}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -780,9 +898,88 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         f.write(index_html)
     return index_path
 
-#############################
-# UI Functions: Prize Table, Reports, Render
-#############################
+##################################
+# FTP Functions
+##################################
+def ftp_upload_dir(ftp, local_dir, remote_dir):
+    try:
+        ftp.mkd(remote_dir)
+    except Exception:
+        pass
+    for item in os.listdir(local_dir):
+        local_path = os.path.join(local_dir, item)
+        remote_path = f"{remote_dir}/{item}"
+        if os.path.isfile(local_path):
+            with open(local_path, "rb") as f:
+                ftp.storbinary(f"STOR {remote_path}", f)
+        elif os.path.isdir(local_path):
+            ftp_upload_dir(ftp, local_path, remote_path)
+
+def mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass):
+    try:
+        ftp = ftplib.FTP(ftp_host)
+        ftp.login(ftp_user, ftp_pass)
+    except Exception as e:
+        messagebox.showerror("FTP Error", f"FTP login failed: {e}")
+        return None
+    if current_tournament_id is None:
+        messagebox.showerror("Error", "No tournament loaded.")
+        return None
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM tournaments WHERE id = ?", (current_tournament_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if not result:
+        messagebox.showerror("Error", "Tournament not found.")
+        return None
+    tournament_name = result[0]
+    local_dir = get_tournament_folder(tournament_name)
+    remote_dir = tournament_name.replace(" ", "_")
+    ftp_upload_dir(ftp, local_dir, remote_dir)
+    ftp.quit()
+    new_link = f"http://{ftp_host}/{remote_dir}/index.html"
+    return new_link
+
+##################################
+# UI Functions: FTP Settings Tab
+##################################
+def setup_ftp_settings(tab_frame):
+    label = ctk.CTkLabel(tab_frame, text="FTP Settings", font=("Arial", 18))
+    label.pack(pady=10)
+    
+    host_label = ctk.CTkLabel(tab_frame, text="FTP Host:")
+    host_label.pack(pady=5)
+    host_entry = ctk.CTkEntry(tab_frame)
+    host_entry.pack(pady=5)
+    
+    user_label = ctk.CTkLabel(tab_frame, text="FTP Username:")
+    user_label.pack(pady=5)
+    user_entry = ctk.CTkEntry(tab_frame)
+    user_entry.pack(pady=5)
+    
+    pass_label = ctk.CTkLabel(tab_frame, text="FTP Password:")
+    pass_label.pack(pady=5)
+    pass_entry = ctk.CTkEntry(tab_frame, show="*")
+    pass_entry.pack(pady=5)
+    
+    def mirror_action():
+        ftp_host = host_entry.get().strip()
+        ftp_user = user_entry.get().strip()
+        ftp_pass = pass_entry.get().strip()
+        if not ftp_host or not ftp_user or not ftp_pass:
+            messagebox.showerror("Error", "Please fill in all FTP fields.")
+            return
+        new_link = mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass)
+        if new_link:
+            messagebox.showinfo("Success", f"Website mirrored successfully!\nShareable link: {new_link}")
+    
+    mirror_button = ctk.CTkButton(tab_frame, text="Mirror Website", command=mirror_action)
+    mirror_button.pack(pady=10)
+
+##################################
+# UI Functions: Prize Table Tab
+##################################
 def setup_prize_table(tab_frame):
     for widget in tab_frame.winfo_children():
         widget.destroy()
@@ -839,7 +1036,7 @@ def setup_prize_table(tab_frame):
     def add_prize():
         name = prize_name_entry.get().strip()
         ptype = prize_type_var.get()
-        if name == "":
+        if not name:
             messagebox.showerror("Error", "Prize name is required.")
             return
         if ptype == "Monetary":
@@ -879,31 +1076,14 @@ def setup_prize_table(tab_frame):
         prize_list_text.configure(state="disabled")
     update_prize_list()
 
+##################################
+# UI Functions: Reports & Render Tabs
+##################################
 def setup_reports(tab_frame):
     label = ctk.CTkLabel(tab_frame, text="Reports & Exports", font=("Arial", 18))
     label.pack(pady=10)
     info = ctk.CTkLabel(tab_frame, text="Reports functionality coming soon!", font=("Arial", 14))
     info.pack(pady=10)
-
-def open_event_index():
-    if current_tournament_id is None:
-        messagebox.showerror("Error", "No tournament loaded. Please create a tournament first.")
-        return
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, date FROM tournaments WHERE id = ?", (current_tournament_id,))
-    result = cursor.fetchone()
-    conn.close()
-    if result:
-        tname, tdate = result[0], result[1]
-    else:
-        tname, tdate = "Tournament", ""
-    generated_index = generate_tournament_html(current_tournament_id, tname, tdate)
-    final_index = finalize_tournament_html(tname, generated_index)
-    rendered_dir = os.path.join(os.getcwd(), "rendered")
-    relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
-    url = f"http://{get_local_ip()}:{HTTP_PORT}/{relative_path}"
-    webbrowser.open(url)
 
 def setup_render(tab_frame):
     label = ctk.CTkLabel(tab_frame, text="Render Event Coverage Index", font=("Arial", 18))
@@ -913,204 +1093,162 @@ def setup_render(tab_frame):
     render_button = ctk.CTkButton(tab_frame, text="Open Event Coverage Index", command=open_event_index)
     render_button.pack(pady=10)
 
-def setup_team_results_ui(tab_frame):
-    label = ctk.CTkLabel(tab_frame, text="Team Results Entry (Coming Soon)", font=("Arial", 18))
-    label.pack(pady=20)
-    info = ctk.CTkLabel(tab_frame, text="Team results functionality will be implemented in a future update.", font=("Arial", 14))
-    info.pack(pady=10)
+def open_event_index():
+    global public_ip
+    if current_tournament_id is None:
+        messagebox.showerror("Error", "No tournament loaded. Please create a tournament first.")
+        return
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, date FROM tournaments WHERE id = ?", (current_tournament_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        tname, tdate = result
+    else:
+        tname, tdate = "Tournament", ""
+    generated_index = generate_tournament_html(current_tournament_id, tname, tdate)
+    final_index = finalize_tournament_html(tname, generated_index)
+    rendered_dir = os.path.join(os.getcwd(), "rendered")
+    relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
+    if not public_ip:
+        public_ip = get_local_ip()
+    url = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
+    webbrowser.open(url)
 
-#############################
-# UI Functions: Setup Tab Content and Build Tab View
-#############################
-def setup_tab_content(tab_name, tab_frame):
-    if tab_name == "Tournament Setup":
-        setup_tournament_setup(tab_frame)
-    elif tab_name == "Player Registration":
-        setup_player_registration(tab_frame)
-    elif tab_name in ("Pairings", "Team Pairings"):
-        setup_pairings(tab_frame)
-    elif tab_name == "Enter Results":
-        label_ind = ctk.CTkLabel(tab_frame, text="Individual Round Result Entry", font=("Arial", 18))
-        label_ind.pack(pady=10)
-        def refresh_rounds():
-            rnums = sorted(completed_rounds.keys())
-            if rnums:
-                rvals = [f"Round {r}" for r in rnums]
-            else:
-                rvals = []
-            round_dropdown.configure(values=rvals)
-            if rvals:
-                round_var.set(rvals[0])
-                load_current_pairing()
-            else:
-                round_var.set("")
-                pairing_label.configure(text="No rounds available.")
-        round_var = ctk.StringVar()
-        round_dropdown = ctk.CTkOptionMenu(tab_frame, variable=round_var, values=[])
-        round_dropdown.pack(pady=5)
-        refresh_button = ctk.CTkButton(tab_frame, text="Refresh Rounds", command=refresh_rounds)
-        refresh_button.pack(pady=5)
-        result_frame = ctk.CTkFrame(tab_frame)
-        result_frame.pack(pady=10)
-        pairing_label = ctk.CTkLabel(result_frame, text="Pairing: ", font=("Arial", 14))
-        pairing_label.grid(row=0, column=0, columnspan=2, pady=5)
-        score1_entry = ctk.CTkEntry(result_frame, placeholder_text="Score for Player 1")
-        score1_entry.grid(row=1, column=0, padx=5, pady=5)
-        score2_entry = ctk.CTkEntry(result_frame, placeholder_text="Score for Player 2")
-        score2_entry.grid(row=1, column=1, padx=5, pady=5)
-        nav_frame = ctk.CTkFrame(tab_frame)
-        nav_frame.pack(pady=5)
-        prev_button = ctk.CTkButton(nav_frame, text="Previous", width=100)
-        prev_button.grid(row=0, column=0, padx=5)
-        next_button = ctk.CTkButton(nav_frame, text="Next", width=100)
-        next_button.grid(row=0, column=1, padx=5)
-        submit_button = ctk.CTkButton(tab_frame, text="Submit/Update Result", width=200)
-        submit_button.pack(pady=5)
-        pairing_index = {"current": 0}
-        def load_current_pairing():
-            if round_var.get().startswith("Round "):
-                sel = int(round_var.get().split()[1])
-                current = completed_rounds.get(sel, [])
-                idx = pairing_index["current"]
-                if not current or idx < 0 or idx >= len(current):
-                    pairing_label.configure(text="No pairing")
-                else:
-                    p1, p2, first = current[idx]
-                    pairing_label.configure(text=f"Pairing {idx+1}/{len(current)}: {p1} vs {p2} (First: {first})")
-                    score1_entry.delete(0, "end")
-                    score2_entry.delete(0, "end")
-                    if sel in results_by_round and len(results_by_round[sel]) > idx and results_by_round[sel][idx] is not None:
-                        s1, s2 = results_by_round[sel][idx]
-                        score1_entry.insert(0, str(s1))
-                        score2_entry.insert(0, str(s2))
-        def on_round_selected(*args):
-            pairing_index["current"] = 0
+##################################
+# UI Functions: Enter Results Tab
+##################################
+def setup_enter_results(tab_frame):
+    label_ind = ctk.CTkLabel(tab_frame, text="Enter Results", font=("Arial", 18))
+    label_ind.pack(pady=10)
+    
+    def refresh_rounds():
+        rnums = sorted(completed_rounds.keys())
+        if rnums:
+            rvals = [f"Round {r}" for r in rnums]
+        else:
+            rvals = []
+        round_dropdown.configure(values=rvals)
+        if rvals:
+            round_var.set(rvals[0])
             load_current_pairing()
-        round_var.trace("w", on_round_selected)
-        def prev_pairing():
-            if pairing_index["current"] > 0:
-                pairing_index["current"] -= 1
-                load_current_pairing()
-        def next_pairing():
-            sel = int(round_var.get().split()[1])
-            current = completed_rounds.get(sel, [])
-            if pairing_index["current"] < len(current) - 1:
-                pairing_index["current"] += 1
-                load_current_pairing()
-        prev_button.configure(command=prev_pairing)
-        next_button.configure(command=next_pairing)
-        def submit_result():
-            if not round_var.get().startswith("Round "):
-                return
+        else:
+            round_var.set("")
+            pairing_label.configure(text="No rounds available.")
+    
+    round_var = ctk.StringVar()
+    round_dropdown = ctk.CTkOptionMenu(tab_frame, variable=round_var, values=[])
+    round_dropdown.pack(pady=5)
+    
+    refresh_button = ctk.CTkButton(tab_frame, text="Refresh Rounds", command=refresh_rounds)
+    refresh_button.pack(pady=5)
+    
+    result_frame = ctk.CTkFrame(tab_frame)
+    result_frame.pack(pady=10)
+    
+    pairing_label = ctk.CTkLabel(result_frame, text="Pairing: ", font=("Arial", 14))
+    pairing_label.grid(row=0, column=0, columnspan=2, pady=5)
+    
+    score1_entry = ctk.CTkEntry(result_frame, placeholder_text="Score for Player 1")
+    score1_entry.grid(row=1, column=0, padx=5, pady=5)
+    
+    score2_entry = ctk.CTkEntry(result_frame, placeholder_text="Score for Player 2")
+    score2_entry.grid(row=1, column=1, padx=5, pady=5)
+    
+    nav_frame = ctk.CTkFrame(tab_frame)
+    nav_frame.pack(pady=5)
+    
+    prev_button = ctk.CTkButton(nav_frame, text="Previous", width=100)
+    prev_button.grid(row=0, column=0, padx=5)
+    
+    next_button = ctk.CTkButton(nav_frame, text="Next", width=100)
+    next_button.grid(row=0, column=1, padx=5)
+    
+    submit_button = ctk.CTkButton(tab_frame, text="Submit/Update Result", width=200)
+    submit_button.pack(pady=5)
+    
+    pairing_index = {"current": 0}
+    
+    def load_current_pairing():
+        if round_var.get().startswith("Round "):
             sel = int(round_var.get().split()[1])
             current = completed_rounds.get(sel, [])
             idx = pairing_index["current"]
-            if idx < 0 or idx >= len(current):
-                return
-            p1, p2, first = current[idx]
-            if p1 == "BYE" or p2 == "BYE":
-                show_toast(tab_frame, "BYE pairing. No result needed.")
-                next_pairing()
-                return
-            try:
-                s1 = int(score1_entry.get().strip())
-                s2 = int(score2_entry.get().strip())
-            except ValueError:
-                show_toast(tab_frame, "Please enter valid numeric scores.")
-                return
-            if sel not in results_by_round:
-                results_by_round[sel] = [None] * len(current)
-            results_by_round[sel][idx] = (s1, s2)
-            recalc_player_stats()
-            if s1 > s2:
-                spread_diff = s1 - s2
-                msg = f"Result submitted. {p1} wins by {spread_diff}."
-            elif s2 > s1:
-                spread_diff = s2 - s1
-                msg = f"Result submitted. {p2} wins by {spread_diff}."
+            if not current or idx < 0 or idx >= len(current):
+                pairing_label.configure(text="No pairing")
             else:
-                msg = "Result submitted. It's a tie."
-            show_toast(tab_frame, msg)
-        submit_button.configure(command=submit_result)
-        refresh_rounds()
-    elif tab_name == "Team Results":
-        setup_team_results_ui(tab_frame)
-    elif tab_name == "Prize Table":
-        setup_prize_table(tab_frame)
-    elif tab_name == "Reports & Exports":
-        setup_reports(tab_frame)
-    elif tab_name == "Render":
-        setup_render(tab_frame)
-    else:
-        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
-        label.pack(pady=20)
-    def save_tab():
-        show_toast(tab_frame, "Tab data saved.")
-    tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
-    tab_save_button.pack(pady=5)
-
-def setup_tab_content_without_save(tab_frame, tab_name):
-    if tab_name in ("Reports & Exports", "Render"):
-        if tab_name == "Reports & Exports":
-            setup_reports(tab_frame)
+                p1, p2, first = current[idx]
+                pairing_label.configure(text=f"Pairing {idx+1}/{len(current)}: {p1} vs {p2} (First: {first})")
+                score1_entry.delete(0, "end")
+                score2_entry.delete(0, "end")
+                if sel in results_by_round and len(results_by_round[sel]) > idx and results_by_round[sel][idx] is not None:
+                    s1, s2 = results_by_round[sel][idx]
+                    score1_entry.insert(0, str(s1))
+                    score2_entry.insert(0, str(s2))
+    
+    def on_round_selected(*args):
+        pairing_index["current"] = 0
+        load_current_pairing()
+    
+    round_var.trace("w", on_round_selected)
+    
+    def prev_pairing():
+        if pairing_index["current"] > 0:
+            pairing_index["current"] -= 1
+            load_current_pairing()
+    
+    def next_pairing():
+        sel = int(round_var.get().split()[1])
+        current = completed_rounds.get(sel, [])
+        if pairing_index["current"] < len(current) - 1:
+            pairing_index["current"] += 1
+            load_current_pairing()
+    
+    prev_button.configure(command=prev_pairing)
+    next_button.configure(command=next_pairing)
+    
+    def submit_result():
+        if not round_var.get().startswith("Round "):
+            return
+        sel = int(round_var.get().split()[1])
+        current = completed_rounds.get(sel, [])
+        idx = pairing_index["current"]
+        if idx < 0 or idx >= len(current):
+            return
+        p1, p2, first = current[idx]
+        if p1 == "BYE" or p2 == "BYE":
+            show_toast(tab_frame, "BYE pairing. No result needed.")
+            next_pairing()
+            return
+        try:
+            s1 = int(score1_entry.get().strip())
+            s2 = int(score2_entry.get().strip())
+        except ValueError:
+            show_toast(tab_frame, "Please enter valid numeric scores.")
+            return
+        if sel not in results_by_round:
+            results_by_round[sel] = [None] * len(current)
+        results_by_round[sel][idx] = (s1, s2)
+        recalc_player_stats()
+        if s1 > s2:
+            spread_diff = s1 - s2
+            msg = f"Result submitted. {p1} wins by {spread_diff}."
+        elif s2 > s1:
+            spread_diff = s2 - s1
+            msg = f"Result submitted. {p2} wins by {spread_diff}."
         else:
-            setup_render(tab_frame)
-    else:
-        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
-        label.pack(pady=20)
+            msg = "Result submitted. It's a tie."
+        show_toast(tab_frame, msg)
+    
+    submit_button.configure(command=submit_result)
+    refresh_rounds()
 
-def build_tab_view(parent):
-    if current_mode_view == "general":
-        tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render"]
-    elif current_mode_view == "team":
-        tabs = ["Tournament Setup", "Player Registration", "Team Pairings", "Team Results", "Prize Table", "Render"]
-    else:
-        tabs = []
-    tab_view = ctk.CTkTabview(parent, width=880, height=700)
-    tab_view.pack(fill="both", expand=True)
-    for tab in tabs:
-        tab_view.add(tab)
-        if current_mode_view == "general" and tab == "Pairings":
-            setup_pairings(tab_view.tab(tab))
-        elif current_mode_view == "general":
-            if tab in ("Reports & Exports", "Render"):
-                setup_tab_content_without_save(tab_view.tab(tab), tab)
-            else:
-                setup_tab_content(tab, tab_view.tab(tab))
-        elif current_mode_view == "team":
-            if tab == "Team Pairings":
-                setup_pairings(tab_view.tab(tab))
-            elif tab == "Team Results":
-                setup_team_results_ui(tab_view.tab(tab))
-            else:
-                if tab in ("Reports & Exports", "Render"):
-                    setup_tab_content_without_save(tab_view.tab(tab), tab)
-                else:
-                    setup_tab_content(tab, tab_view.tab(tab))
-    return tab_view
-
-def rebuild_tab_view():
-    global main_frame_global
-    for widget in main_frame_global.winfo_children():
-        widget.destroy()
-    return build_tab_view(main_frame_global)
-
-def switch_mode_toggle():
-    global current_mode_view, tournament_mode
-    if current_mode_view == "general":
-        current_mode_view = "team"
-        tournament_mode = "Team Round Robin"
-    else:
-        current_mode_view = "general"
-        tournament_mode = "General"
-    rebuild_tab_view()
-    show_toast(app, f"Switched to {current_mode_view.capitalize()} Mode.")
-
-#############################
-# Setup Tournament & Player Registration Functions
-#############################
+##################################
+# UI Functions: Tournament Setup Tab
+##################################
 def setup_tournament_setup(tab_frame):
-    global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds
+    global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds, public_ip
     label = ctk.CTkLabel(tab_frame, text="Set Up a New Tournament", font=("Arial", 18))
     label.pack(pady=10)
     tournament_name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament name")
@@ -1126,27 +1264,27 @@ def setup_tournament_setup(tab_frame):
         team_names_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter team names (comma-separated)")
         team_names_entry.pack(pady=5)
     def create_tournament():
-        global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds
+        global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds, public_ip
         name = tournament_name_entry.get().strip()
         date = tournament_date_entry.get().strip()
         venue = venue_entry.get().strip()
-        if name == "" or date == "" or venue == "":
+        if not name or not date or not venue:
             show_toast(tab_frame, "Please enter valid tournament details, including venue.")
             return
         if current_mode_view == "team":
             tournament_mode = "Team Round Robin"
             team_size = int(team_size_var.get())
             team_names = team_names_entry.get().strip()
-            if team_names == "":
+            if not team_names:
                 show_toast(tab_frame, "Please enter team names.")
                 return
-            teams_list = [t.strip() for t in team_names.split(",") if t.strip() != ""]
+            teams_list = [t.strip() for t in team_names.split(",") if t.strip()]
             if len(teams_list) < 2:
                 show_toast(tab_frame, "Please enter at least two team names.")
                 return
             last_pairing_system = "Team Round Robin"
             last_team_size = team_size
-        elif current_mode_view == "general":
+        else:
             tournament_mode = "General"
             teams_list = []
             team_size = 0
@@ -1165,7 +1303,11 @@ def setup_tournament_setup(tab_frame):
             final_file = finalize_tournament_html(name, generated_file)
             rendered_dir = os.path.join(os.getcwd(), "rendered")
             relative_path = os.path.relpath(final_file, rendered_dir).replace(os.sep, '/')
-            shareable_link = f"http://{get_local_ip()}:{HTTP_PORT}/{relative_path}"
+            public_ip = simpledialog.askstring("Public IP or Domain", 
+                "Enter the public IP or domain for players to access (leave blank for local access):")
+            if not public_ip:
+                public_ip = get_local_ip()
+            shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
             update_tournament_link(tournament_id, shareable_link)
             show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
             print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_link}")
@@ -1181,6 +1323,9 @@ def setup_tournament_setup(tab_frame):
     create_button = ctk.CTkButton(tab_frame, text="Create Tournament", command=create_tournament)
     create_button.pack(pady=10)
 
+##################################
+# UI Functions: Player Registration Tab
+##################################
 def setup_player_registration(tab_frame):
     global current_tournament_id, session_players, tournament_mode, teams_list
     label = ctk.CTkLabel(tab_frame, text="Register a New Player", font=("Arial", 18))
@@ -1221,13 +1366,13 @@ def setup_player_registration(tab_frame):
             rating = int(rating_str) if rating_str and rating_str.isdigit() else 0
         except ValueError:
             rating = 0
-        if name == "":
+        if not name:
             show_toast(tab_frame, "Please enter a valid name!")
             return
         team = ""
         if tournament_mode == "Team Round Robin":
             team = team_var.get()
-            if team == "No Teams Defined" or team == "":
+            if team in ("No Teams Defined", ""):
                 show_toast(tab_frame, "Please select a team.")
                 return
         conn = create_connection()
@@ -1242,334 +1387,11 @@ def setup_player_registration(tab_frame):
     register_button = ctk.CTkButton(tab_frame, text="Register Player", command=register_player)
     register_button.pack(pady=10)
 
-#############################
-# UI Functions: Setup Tab Content and Build Tab View
-#############################
-def setup_tab_content(tab_name, tab_frame):
-    if tab_name == "Tournament Setup":
-        setup_tournament_setup(tab_frame)
-    elif tab_name == "Player Registration":
-        setup_player_registration(tab_frame)
-    elif tab_name in ("Pairings", "Team Pairings"):
-        setup_pairings(tab_frame)
-    elif tab_name == "Enter Results":
-        label_ind = ctk.CTkLabel(tab_frame, text="Individual Round Result Entry", font=("Arial", 18))
-        label_ind.pack(pady=10)
-        def refresh_rounds():
-            rnums = sorted(completed_rounds.keys())
-            if rnums:
-                rvals = [f"Round {r}" for r in rnums]
-            else:
-                rvals = []
-            round_dropdown.configure(values=rvals)
-            if rvals:
-                round_var.set(rvals[0])
-                load_current_pairing()
-            else:
-                round_var.set("")
-                pairing_label.configure(text="No rounds available.")
-        round_var = ctk.StringVar()
-        round_dropdown = ctk.CTkOptionMenu(tab_frame, variable=round_var, values=[])
-        round_dropdown.pack(pady=5)
-        refresh_button = ctk.CTkButton(tab_frame, text="Refresh Rounds", command=refresh_rounds)
-        refresh_button.pack(pady=5)
-        result_frame = ctk.CTkFrame(tab_frame)
-        result_frame.pack(pady=10)
-        pairing_label = ctk.CTkLabel(result_frame, text="Pairing: ", font=("Arial", 14))
-        pairing_label.grid(row=0, column=0, columnspan=2, pady=5)
-        score1_entry = ctk.CTkEntry(result_frame, placeholder_text="Score for Player 1")
-        score1_entry.grid(row=1, column=0, padx=5, pady=5)
-        score2_entry = ctk.CTkEntry(result_frame, placeholder_text="Score for Player 2")
-        score2_entry.grid(row=1, column=1, padx=5, pady=5)
-        nav_frame = ctk.CTkFrame(tab_frame)
-        nav_frame.pack(pady=5)
-        prev_button = ctk.CTkButton(nav_frame, text="Previous", width=100)
-        prev_button.grid(row=0, column=0, padx=5)
-        next_button = ctk.CTkButton(nav_frame, text="Next", width=100)
-        next_button.grid(row=0, column=1, padx=5)
-        submit_button = ctk.CTkButton(tab_frame, text="Submit/Update Result", width=200)
-        submit_button.pack(pady=5)
-        pairing_index = {"current": 0}
-        def load_current_pairing():
-            if round_var.get().startswith("Round "):
-                sel = int(round_var.get().split()[1])
-                current = completed_rounds.get(sel, [])
-                idx = pairing_index["current"]
-                if not current or idx < 0 or idx >= len(current):
-                    pairing_label.configure(text="No pairing")
-                else:
-                    p1, p2, first = current[idx]
-                    pairing_label.configure(text=f"Pairing {idx+1}/{len(current)}: {p1} vs {p2} (First: {first})")
-                    score1_entry.delete(0, "end")
-                    score2_entry.delete(0, "end")
-                    if sel in results_by_round and len(results_by_round[sel]) > idx and results_by_round[sel][idx] is not None:
-                        s1, s2 = results_by_round[sel][idx]
-                        score1_entry.insert(0, str(s1))
-                        score2_entry.insert(0, str(s2))
-        def on_round_selected(*args):
-            pairing_index["current"] = 0
-            load_current_pairing()
-        round_var.trace("w", on_round_selected)
-        def prev_pairing():
-            if pairing_index["current"] > 0:
-                pairing_index["current"] -= 1
-                load_current_pairing()
-        def next_pairing():
-            sel = int(round_var.get().split()[1])
-            current = completed_rounds.get(sel, [])
-            if pairing_index["current"] < len(current) - 1:
-                pairing_index["current"] += 1
-                load_current_pairing()
-        prev_button.configure(command=prev_pairing)
-        next_button.configure(command=next_pairing)
-        def submit_result():
-            if not round_var.get().startswith("Round "):
-                return
-            sel = int(round_var.get().split()[1])
-            current = completed_rounds.get(sel, [])
-            idx = pairing_index["current"]
-            if idx < 0 or idx >= len(current):
-                return
-            p1, p2, first = current[idx]
-            if p1 == "BYE" or p2 == "BYE":
-                show_toast(tab_frame, "BYE pairing. No result needed.")
-                next_pairing()
-                return
-            try:
-                s1 = int(score1_entry.get().strip())
-                s2 = int(score2_entry.get().strip())
-            except ValueError:
-                show_toast(tab_frame, "Please enter valid numeric scores.")
-                return
-            if sel not in results_by_round:
-                results_by_round[sel] = [None] * len(current)
-            results_by_round[sel][idx] = (s1, s2)
-            recalc_player_stats()
-            if s1 > s2:
-                spread_diff = s1 - s2
-                msg = f"Result submitted. {p1} wins by {spread_diff}."
-            elif s2 > s1:
-                spread_diff = s2 - s1
-                msg = f"Result submitted. {p2} wins by {spread_diff}."
-            else:
-                msg = "Result submitted. It's a tie."
-            show_toast(tab_frame, msg)
-        submit_button.configure(command=submit_result)
-        refresh_rounds()
-    elif tab_name == "Team Results":
-        setup_team_results_ui(tab_frame)
-    elif tab_name == "Prize Table":
-        setup_prize_table(tab_frame)
-    elif tab_name == "Reports & Exports":
-        setup_reports(tab_frame)
-    elif tab_name == "Render":
-        setup_render(tab_frame)
-    else:
-        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
-        label.pack(pady=20)
-    def save_tab():
-        show_toast(tab_frame, "Tab data saved.")
-    tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
-    tab_save_button.pack(pady=5)
-
-def setup_tab_content_without_save(tab_frame, tab_name):
-    if tab_name in ("Reports & Exports", "Render"):
-        if tab_name == "Reports & Exports":
-            setup_reports(tab_frame)
-        else:
-            setup_render(tab_frame)
-    else:
-        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
-        label.pack(pady=20)
-
-def build_tab_view(parent):
-    if current_mode_view == "general":
-        tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render"]
-    elif current_mode_view == "team":
-        tabs = ["Tournament Setup", "Player Registration", "Team Pairings", "Team Results", "Prize Table", "Render"]
-    else:
-        tabs = []
-    tab_view = ctk.CTkTabview(parent, width=880, height=700)
-    tab_view.pack(fill="both", expand=True)
-    for tab in tabs:
-        tab_view.add(tab)
-        if current_mode_view == "general" and tab == "Pairings":
-            setup_pairings(tab_view.tab(tab))
-        elif current_mode_view == "general":
-            if tab in ("Reports & Exports", "Render"):
-                setup_tab_content_without_save(tab_view.tab(tab), tab)
-            else:
-                setup_tab_content(tab, tab_view.tab(tab))
-        elif current_mode_view == "team":
-            if tab == "Team Pairings":
-                setup_pairings(tab_view.tab(tab))
-            elif tab == "Team Results":
-                setup_team_results_ui(tab_view.tab(tab))
-            else:
-                if tab in ("Reports & Exports", "Render"):
-                    setup_tab_content_without_save(tab_view.tab(tab), tab)
-                else:
-                    setup_tab_content(tab, tab_view.tab(tab))
-    return tab_view
-
-def rebuild_tab_view():
-    global main_frame_global
-    for widget in main_frame_global.winfo_children():
-        widget.destroy()
-    return build_tab_view(main_frame_global)
-
-def switch_mode_toggle():
-    global current_mode_view, tournament_mode
-    if current_mode_view == "general":
-        current_mode_view = "team"
-        tournament_mode = "Team Round Robin"
-    else:
-        current_mode_view = "general"
-        tournament_mode = "General"
-    rebuild_tab_view()
-    show_toast(app, f"Switched to {current_mode_view.capitalize()} Mode.")
-
-#############################
-# Setup Tournament & Player Registration Functions
-#############################
-def setup_tournament_setup(tab_frame):
-    global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds
-    label = ctk.CTkLabel(tab_frame, text="Set Up a New Tournament", font=("Arial", 18))
-    label.pack(pady=10)
-    tournament_name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament name")
-    tournament_name_entry.pack(pady=5)
-    tournament_date_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament date (YYYY-MM-DD)")
-    tournament_date_entry.pack(pady=5)
-    venue_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament venue")
-    venue_entry.pack(pady=5)
-    if current_mode_view == "team":
-        team_size_var = ctk.StringVar(value="3")
-        team_size_menu = ctk.CTkOptionMenu(tab_frame, variable=team_size_var, values=["3", "5"])
-        team_size_menu.pack(pady=5)
-        team_names_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter team names (comma-separated)")
-        team_names_entry.pack(pady=5)
-    def create_tournament():
-        global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds
-        name = tournament_name_entry.get().strip()
-        date = tournament_date_entry.get().strip()
-        venue = venue_entry.get().strip()
-        if name == "" or date == "" or venue == "":
-            show_toast(tab_frame, "Please enter valid tournament details, including venue.")
-            return
-        if current_mode_view == "team":
-            tournament_mode = "Team Round Robin"
-            team_size = int(team_size_var.get())
-            team_names = team_names_entry.get().strip()
-            if team_names == "":
-                show_toast(tab_frame, "Please enter team names.")
-                return
-            teams_list = [t.strip() for t in team_names.split(",") if t.strip() != ""]
-            if len(teams_list) < 2:
-                show_toast(tab_frame, "Please enter at least two team names.")
-                return
-            last_pairing_system = "Team Round Robin"
-            last_team_size = team_size
-        elif current_mode_view == "general":
-            tournament_mode = "General"
-            teams_list = []
-            team_size = 0
-            last_pairing_system = "Round Robin"
-            desired_rr_rounds = None
-        conn = create_connection()
-        tournament_id = insert_tournament(conn, name, date, venue)
-        conn.close()
-        if tournament_id:
-            current_tournament_id = tournament_id
-            session_players = []
-            current_round_number = 0
-            completed_rounds.clear()
-            results_by_round.clear()
-            generated_file = generate_tournament_html(tournament_id, name, date)
-            final_file = finalize_tournament_html(name, generated_file)
-            rendered_dir = os.path.join(os.getcwd(), "rendered")
-            relative_path = os.path.relpath(final_file, rendered_dir).replace(os.sep, '/')
-            shareable_link = f"http://{get_local_ip()}:{HTTP_PORT}/{relative_path}"
-            update_tournament_link(tournament_id, shareable_link)
-            show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
-            print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_link}")
-            update_status()
-        else:
-            show_toast(tab_frame, "Failed to create tournament.")
-            print("Failed to create tournament.")
-        tournament_name_entry.delete(0, 'end')
-        tournament_date_entry.delete(0, 'end')
-        venue_entry.delete(0, 'end')
-        if current_mode_view == "team":
-            team_names_entry.delete(0, 'end')
-    create_button = ctk.CTkButton(tab_frame, text="Create Tournament", command=create_tournament)
-    create_button.pack(pady=10)
-
-def setup_player_registration(tab_frame):
-    global current_tournament_id, session_players, tournament_mode, teams_list
-    label = ctk.CTkLabel(tab_frame, text="Register a New Player", font=("Arial", 18))
-    label.pack(pady=10)
-    name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter player name")
-    name_entry.pack(pady=5)
-    rating_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter rating (or 000 if unrated)")
-    rating_entry.pack(pady=5)
-    rating_entry.insert(0, "000")
-    if tournament_mode == "Team Round Robin":
-        team_var = ctk.StringVar()
-        team_dropdown = ctk.CTkOptionMenu(tab_frame, variable=team_var, values=teams_list if teams_list else ["No Teams Defined"])
-        team_dropdown.pack(pady=5)
-    player_list_text = ctk.CTkTextbox(tab_frame, width=400, height=200)
-    player_list_text.pack(pady=10)
-    player_list_text.insert("end", "Registered Players (This Tournament):\n")
-    player_list_text.configure(state="disabled")
-    def update_player_list():
-        if current_tournament_id is None:
-            return
-        players = get_players_for_tournament(current_tournament_id)
-        player_list_text.configure(state="normal")
-        player_list_text.delete("1.0", "end")
-        player_list_text.insert("end", "Registered Players (This Tournament):\n")
-        for player in players:
-            team = player[8] if len(player) > 8 and player[8] else ""
-            display_name = f"{player[1]}, ({team})" if team else player[1]
-            player_list_text.insert("end", f"{display_name} (Rating: {player[2]})\n")
-        player_list_text.configure(state="disabled")
-    def register_player():
-        global current_tournament_id, session_players
-        if current_tournament_id is None:
-            show_toast(tab_frame, "Please create a tournament first!")
-            return
-        name = name_entry.get().strip()
-        rating_str = rating_entry.get().strip()
-        try:
-            rating = int(rating_str) if rating_str and rating_str.isdigit() else 0
-        except ValueError:
-            rating = 0
-        if name == "":
-            show_toast(tab_frame, "Please enter a valid name!")
-            return
-        team = ""
-        if tournament_mode == "Team Round Robin":
-            team = team_var.get()
-            if team == "No Teams Defined" or team == "":
-                show_toast(tab_frame, "Please select a team.")
-                return
-        conn = create_connection()
-        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team)
-        conn.close()
-        show_toast(tab_frame, f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
-        print(f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
-        name_entry.delete(0, 'end')
-        rating_entry.delete(0, 'end')
-        rating_entry.insert(0, "000")
-        update_player_list()
-    register_button = ctk.CTkButton(tab_frame, text="Register Player", command=register_player)
-    register_button.pack(pady=10)
-
-#############################
-# UI Functions: Setup Pairings
-#############################
+##################################
+# UI Functions: Pairings Tab
+##################################
 def setup_pairings(tab_frame):
-    global current_round_number, completed_rounds, last_pairing_system
+    global current_round_number, completed_rounds, last_pairing_system, pairing_text
     for widget in tab_frame.winfo_children():
         widget.destroy()
     label = ctk.CTkLabel(tab_frame, text="Pairings", font=("Arial", 18))
@@ -1588,8 +1410,6 @@ def setup_pairings(tab_frame):
     pair_button.grid(row=0, column=0, padx=5)
     unpair_button = ctk.CTkButton(button_frame, text="Unpair Round", command=lambda: unpair_round(round_selection_var))
     unpair_button.grid(row=0, column=1, padx=5)
-    # Define pairing_text widget BEFORE calling display_pairings
-    global pairing_text
     pairing_text = ctk.CTkTextbox(tab_frame, width=400, height=250)
     pairing_text.pack(pady=10)
     def update_round_options():
@@ -1597,89 +1417,103 @@ def setup_pairings(tab_frame):
         round_dropdown.configure(values=opts)
         if round_selection_var.get() not in opts:
             round_selection_var.set("New Round")
+    def display_full_schedule():
+        pairing_text.delete("1.0", "end")
+        for r in sorted(completed_rounds.keys()):
+            pairing_text.insert("end", f"Round {r}:\n")
+            for idx, pairing in enumerate(completed_rounds[r], start=1):
+                if len(pairing) == 3:
+                    p1, p2, first = pairing
+                else:
+                    p1, p2 = pairing
+                    first = random.choice([p1, p2])
+                pairing_text.insert("end", f"  {idx}. {p1} vs {p2} (First: {first})\n")
+            pairing_text.insert("end", "\n")
     def pair_round(round_var, system_var):
         global current_round_number, completed_rounds, last_pairing_system, full_round_robin_schedule
         if current_tournament_id is None:
             messagebox.showerror("Error", "No tournament loaded.")
             return
         if round_var.get() != "New Round":
-            messagebox.showerror("Error", "Selected round already exists. Unpair it to re-pair.")
-            return
-        conn = create_connection()
-        players = get_players_for_tournament(current_tournament_id)
-        conn.close()
-        if not players or len(players) < 2:
-            messagebox.showerror("Error", "Not enough players for pairings.")
+            messagebox.showerror("Error", "Selected round already exists.")
             return
         last_pairing_system = system_var.get()
-        if last_pairing_system == "Round Robin":
-            global full_round_robin_schedule, desired_rr_rounds, current_round_number
-            names = [p[1] for p in players]
-            full_round_robin_schedule = assign_firsts(round_robin_rounds(names))
-            total_rounds = len(full_round_robin_schedule)
-            if desired_rr_rounds is None:
-                desired_rr_rounds = simpledialog.askinteger("Round Robin Schedule",
-                    f"A full round robin schedule for {len(players)} players is completed in {total_rounds} rounds.\nHow many rounds do you want to generate?",
-                    minvalue=1, maxvalue=total_rounds)
-                for r in range(1, desired_rr_rounds+1):
-                    completed_rounds[r] = full_round_robin_schedule[r-1]
-                current_round_number = desired_rr_rounds
-                new_round = full_round_robin_schedule[desired_rr_rounds - 1]
-            else:
-                messagebox.showerror("Error", "Full round robin schedule already generated. Please select an existing round.")
-                return
-        else:
-            new_round = generate_general_pairings(players, last_pairing_system)
+        players = get_players_for_tournament(current_tournament_id)
+        new_pairings = generate_pairings_system(players, system=last_pairing_system)
         current_round_number += 1
-        if new_round is not None:
-            completed_rounds[current_round_number] = new_round
-            messagebox.showinfo("Success", f"Pairings for Round {current_round_number} generated.")
+        completed_rounds[current_round_number] = new_pairings
         update_round_options()
-        display_pairings()
+        display_full_schedule()
     def unpair_round(round_var):
-        global current_round_number, completed_rounds, results_by_round
-        sel = round_var.get()
-        if sel == "New Round":
-            messagebox.showerror("Error", "Select an existing round to unpair.")
+        if round_var.get() == "New Round":
+            messagebox.showerror("Error", "No round selected for unpairing.")
             return
-        try:
-            rnd_num = int(sel.split()[1])
-        except:
-            messagebox.showerror("Error", "Invalid round selection.")
-            return
-        if rnd_num in completed_rounds:
-            del completed_rounds[rnd_num]
-            if rnd_num in results_by_round:
-                del results_by_round[rnd_num]
-            messagebox.showinfo("Success", f"Round {rnd_num} unpaired.")
-            if rnd_num == current_round_number:
-                current_round_number = max(completed_rounds.keys()) if completed_rounds else 0
+        round_num = int(round_var.get().split()[1])
+        if round_num in completed_rounds:
+            del completed_rounds[round_num]
             update_round_options()
-            display_pairings()
-        else:
-            messagebox.showerror("Error", "Selected round not found.")
-    def display_pairings():
-        pairing_text.configure(state="normal")
-        pairing_text.delete("1.0", "end")
-        if last_pairing_system == "Round Robin" and completed_rounds:
-            pairing_text.insert("end", "Complete Preview of All Rounds:\n\n")
-            for rnd in sorted(completed_rounds.keys()):
-                pairing_text.insert("end", f"Round {rnd}:\n")
-                for idx, pairing in enumerate(completed_rounds[rnd], start=1):
-                    p1, p2, first = pairing
-                    pairing_text.insert("end", f"  {idx}. {p1} vs {p2} (First: {first})\n")
-                pairing_text.insert("end", "\n")
-        else:
-            if current_round_number in completed_rounds:
-                pairings = completed_rounds[current_round_number]
-                for idx, pairing in enumerate(pairings, start=1):
-                    p1, p2, first = pairing
-                    pairing_text.insert("end", f"{idx}. {p1} vs {p2} (First: {first})\n")
-            else:
-                pairing_text.insert("end", "No pairings available.")
-        pairing_text.configure(state="disabled")
+            pairing_text.delete("1.0", "end")
     update_round_options()
-    display_pairings()
+
+##################################
+# UI Functions: Build Tab View
+##################################
+def setup_tab_content(tab_name, tab_frame):
+    if tab_name == "Tournament Setup":
+        setup_tournament_setup(tab_frame)
+    elif tab_name == "Player Registration":
+        setup_player_registration(tab_frame)
+    elif tab_name in ("Pairings", "Team Pairings"):
+        setup_pairings(tab_frame)
+    elif tab_name == "Enter Results":
+        setup_enter_results(tab_frame)
+    elif tab_name == "Prize Table":
+        setup_prize_table(tab_frame)
+    elif tab_name in ("Reports & Exports", "Render"):
+        if tab_name == "Reports & Exports":
+            setup_reports(tab_frame)
+        else:
+            setup_render(tab_frame)
+    elif tab_name == "FTP Settings":
+        setup_ftp_settings(tab_frame)
+    else:
+        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
+        label.pack(pady=20)
+    def save_tab():
+        show_toast(tab_frame, "Tab data saved.")
+    tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
+    tab_save_button.pack(pady=5)
+
+def setup_tab_content_without_save(tab_frame, tab_name):
+    if tab_name in ("Reports & Exports", "Render", "FTP Settings"):
+        if tab_name == "Reports & Exports":
+            setup_reports(tab_frame)
+        elif tab_name == "Render":
+            setup_render(tab_frame)
+        else:
+            setup_ftp_settings(tab_frame)
+    else:
+        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
+        label.pack(pady=20)
+
+def build_tab_view(parent):
+    if current_mode_view == "general":
+        tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render", "FTP Settings"]
+    elif current_mode_view == "team":
+        tabs = ["Tournament Setup", "Player Registration", "Team Pairings", "Team Results", "Prize Table", "Render", "FTP Settings"]
+    else:
+        tabs = []
+    tab_view = ctk.CTkTabview(parent, width=880, height=700)
+    tab_view.pack(fill="both", expand=True)
+    for tab in tabs:
+        tab_view.add(tab)
+        if current_mode_view in ("general", "team") and tab in ("Pairings", "Team Pairings"):
+            setup_pairings(tab_view.tab(tab))
+        elif tab in ("Reports & Exports", "Render", "FTP Settings"):
+            setup_tab_content_without_save(tab_view.tab(tab), tab)
+        else:
+            setup_tab_content(tab, tab_view.tab(tab))
+    return tab_view
 
 def rebuild_tab_view():
     global main_frame_global
@@ -1698,161 +1532,33 @@ def switch_mode_toggle():
     rebuild_tab_view()
     show_toast(app, f"Switched to {current_mode_view.capitalize()} Mode.")
 
-#############################
-# Setup Tournament & Player Registration Functions
-#############################
-def setup_tournament_setup(tab_frame):
-    global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds
-    label = ctk.CTkLabel(tab_frame, text="Set Up a New Tournament", font=("Arial", 18))
-    label.pack(pady=10)
-    tournament_name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament name")
-    tournament_name_entry.pack(pady=5)
-    tournament_date_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament date (YYYY-MM-DD)")
-    tournament_date_entry.pack(pady=5)
-    venue_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament venue")
-    venue_entry.pack(pady=5)
-    if current_mode_view == "team":
-        team_size_var = ctk.StringVar(value="3")
-        team_size_menu = ctk.CTkOptionMenu(tab_frame, variable=team_size_var, values=["3", "5"])
-        team_size_menu.pack(pady=5)
-        team_names_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter team names (comma-separated)")
-        team_names_entry.pack(pady=5)
-    def create_tournament():
-        global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds
-        name = tournament_name_entry.get().strip()
-        date = tournament_date_entry.get().strip()
-        venue = venue_entry.get().strip()
-        if name == "" or date == "" or venue == "":
-            show_toast(tab_frame, "Please enter valid tournament details, including venue.")
-            return
-        if current_mode_view == "team":
-            tournament_mode = "Team Round Robin"
-            team_size = int(team_size_var.get())
-            team_names = team_names_entry.get().strip()
-            if team_names == "":
-                show_toast(tab_frame, "Please enter team names.")
-                return
-            teams_list = [t.strip() for t in team_names.split(",") if t.strip() != ""]
-            if len(teams_list) < 2:
-                show_toast(tab_frame, "Please enter at least two team names.")
-                return
-            last_pairing_system = "Team Round Robin"
-            last_team_size = team_size
-        elif current_mode_view == "general":
-            tournament_mode = "General"
-            teams_list = []
-            team_size = 0
-            last_pairing_system = "Round Robin"
-            desired_rr_rounds = None
-        conn = create_connection()
-        tournament_id = insert_tournament(conn, name, date, venue)
-        conn.close()
-        if tournament_id:
-            current_tournament_id = tournament_id
-            session_players = []
-            current_round_number = 0
-            completed_rounds.clear()
-            results_by_round.clear()
-            generated_file = generate_tournament_html(tournament_id, name, date)
-            final_file = finalize_tournament_html(name, generated_file)
-            rendered_dir = os.path.join(os.getcwd(), "rendered")
-            relative_path = os.path.relpath(final_file, rendered_dir).replace(os.sep, '/')
-            shareable_link = f"http://{get_local_ip()}:{HTTP_PORT}/{relative_path}"
-            update_tournament_link(tournament_id, shareable_link)
-            show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
-            print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_link}")
-            update_status()
-        else:
-            show_toast(tab_frame, "Failed to create tournament.")
-            print("Failed to create tournament.")
-        tournament_name_entry.delete(0, 'end')
-        tournament_date_entry.delete(0, 'end')
-        venue_entry.delete(0, 'end')
-        if current_mode_view == "team":
-            team_names_entry.delete(0, 'end')
-    create_button = ctk.CTkButton(tab_frame, text="Create Tournament", command=create_tournament)
-    create_button.pack(pady=10)
-
-def setup_player_registration(tab_frame):
-    global current_tournament_id, session_players, tournament_mode, teams_list
-    label = ctk.CTkLabel(tab_frame, text="Register a New Player", font=("Arial", 18))
-    label.pack(pady=10)
-    name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter player name")
-    name_entry.pack(pady=5)
-    rating_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter rating (or 000 if unrated)")
-    rating_entry.pack(pady=5)
-    rating_entry.insert(0, "000")
-    if tournament_mode == "Team Round Robin":
-        team_var = ctk.StringVar()
-        team_dropdown = ctk.CTkOptionMenu(tab_frame, variable=team_var, values=teams_list if teams_list else ["No Teams Defined"])
-        team_dropdown.pack(pady=5)
-    player_list_text = ctk.CTkTextbox(tab_frame, width=400, height=200)
-    player_list_text.pack(pady=10)
-    player_list_text.insert("end", "Registered Players (This Tournament):\n")
-    player_list_text.configure(state="disabled")
-    def update_player_list():
-        if current_tournament_id is None:
-            return
-        players = get_players_for_tournament(current_tournament_id)
-        player_list_text.configure(state="normal")
-        player_list_text.delete("1.0", "end")
-        player_list_text.insert("end", "Registered Players (This Tournament):\n")
-        for player in players:
-            team = player[8] if len(player) > 8 and player[8] else ""
-            display_name = f"{player[1]}, ({team})" if team else player[1]
-            player_list_text.insert("end", f"{display_name} (Rating: {player[2]})\n")
-        player_list_text.configure(state="disabled")
-    def register_player():
-        global current_tournament_id, session_players
-        if current_tournament_id is None:
-            show_toast(tab_frame, "Please create a tournament first!")
-            return
-        name = name_entry.get().strip()
-        rating_str = rating_entry.get().strip()
-        try:
-            rating = int(rating_str) if rating_str and rating_str.isdigit() else 0
-        except ValueError:
-            rating = 0
-        if name == "":
-            show_toast(tab_frame, "Please enter a valid name!")
-            return
-        team = ""
-        if tournament_mode == "Team Round Robin":
-            team = team_var.get()
-            if team == "No Teams Defined" or team == "":
-                show_toast(tab_frame, "Please select a team.")
-                return
-        conn = create_connection()
-        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team)
-        conn.close()
-        show_toast(tab_frame, f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
-        print(f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
-        name_entry.delete(0, 'end')
-        rating_entry.delete(0, 'end')
-        rating_entry.insert(0, "000")
-        update_player_list()
-    register_button = ctk.CTkButton(tab_frame, text="Register Player", command=register_player)
-    register_button.pack(pady=10)
-
-#############################
-# Main Execution with Sidebar
-#############################
+##################################
+# Main Application Entry Point with Sidebar
+##################################
 if __name__ == "__main__":
     app = ctk.CTk()
+    app.title("Direktor EXE – Scrabble Tournament Manager")
     app.geometry("1200x800")
-    app.title("Direktor - Scrabble Tournament Manager")
-    container = ctk.CTkFrame(app)
-    container.pack(fill="both", expand=True)
-    sidebar = ctk.CTkFrame(container, width=200)
-    sidebar.pack(side="left", fill="y")
-    main_frame_global = ctk.CTkFrame(container)
-    main_frame_global.pack(side="right", fill="both", expand=True)
-    save_button = ctk.CTkButton(sidebar, text="Save Tournament", command=save_current_tournament)
-    save_button.pack(pady=10, padx=10)
-    load_button = ctk.CTkButton(sidebar, text="Load Tournament", command=load_tournament)
-    load_button.pack(pady=10, padx=10)
-    quit_button = ctk.CTkButton(sidebar, text="Quit App", command=quit_app)
-    quit_button.pack(pady=10, padx=10)
+    
+    app.grid_columnconfigure(1, weight=1)
+    app.grid_rowconfigure(0, weight=1)
+    
+    sidebar_frame = ctk.CTkFrame(app, width=200, corner_radius=0)
+    sidebar_frame.grid(row=0, column=0, sticky="nswe")
+    
+    save_button = ctk.CTkButton(sidebar_frame, text="Save Tournament", command=save_current_tournament)
+    save_button.pack(pady=10, padx=20)
+    load_button = ctk.CTkButton(sidebar_frame, text="Load Tournament", command=load_tournament)
+    load_button.pack(pady=10, padx=20)
+    quit_button = ctk.CTkButton(sidebar_frame, text="Quit App", command=quit_app)
+    quit_button.pack(pady=10, padx=20)
+    
+    main_frame_global = ctk.CTkFrame(app)
+    main_frame_global.grid(row=0, column=1, sticky="nsew")
+    
+    initialize_database()
+    start_http_server_custom(HTTP_PORT)
+    
     build_tab_view(main_frame_global)
-    start_http_server(HTTP_PORT)
+    
     app.mainloop()
