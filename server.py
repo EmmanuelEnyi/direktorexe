@@ -1,73 +1,29 @@
-import http.server
-import socketserver
-import json
 import os
 import sqlite3
-from urllib.parse import parse_qs
+from flask import Flask, request, send_from_directory, abort
 
-# Configuration
-PORT = int(os.environ.get("PORT", 8000))  # Heroku assigns a dynamic port
-DB_FILE = "tournament.db"  # SQLite database for tournament data
-RENDERED_DIR = os.path.join(os.getcwd(), "rendered")  # Directory for HTML files
+app = Flask(__name__)
+PORT = int(os.environ.get("PORT", 8000))
 
-# Ensure the directory exists
-os.makedirs(RENDERED_DIR, exist_ok=True)
+# Route to serve your event coverage index.
+# Assumes that the current tournament’s index is at rendered/index.html.
+@app.route("/")
+def index():
+    # You could also add logic here to choose which tournament index to serve.
+    return send_from_directory("rendered", "index.html")
 
-class TournamentRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """ Custom HTTP handler to serve event coverage and handle result submissions. """
-
-    def do_GET(self):
-        """ Serve static HTML pages or a submission form """
-        if self.path == "/submit_results":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            self.wfile.write(self.get_submission_form().encode())
-        else:
-            super().do_GET()
-
-    def do_POST(self):
-        """ Handle player result submissions """
-        if self.path == "/submit_results":
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            fields = parse_qs(post_data.decode())
-
-            match_id = fields.get("match_id", [None])[0]
-            score1 = fields.get("score1", [None])[0]
-            score2 = fields.get("score2", [None])[0]
-
-            if not match_id or score1 is None or score2 is None:
-                self.send_error(400, "Missing required fields")
-                return
-
-            try:
-                score1, score2 = int(score1), int(score2)
-            except ValueError:
-                self.send_error(400, "Scores must be numeric")
-                return
-
-            # Save results to database
-            success = self.save_result(match_id, score1, score2)
-
-            if success:
-                self.send_response(200)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Result submitted successfully.")
-            else:
-                self.send_error(400, "Invalid match ID or match already has a result.")
-
-    def get_submission_form(self):
-        """ Returns the HTML form for submitting match results """
+# Remote results submission endpoint
+@app.route("/submit_results", methods=["GET", "POST"])
+def submit_results():
+    if request.method == "GET":
         return """
         <!DOCTYPE html>
         <html>
         <head>
             <title>Submit Match Results</title>
             <style>
-                body { font-family: Arial, sans-serif; margin: 40px; }
-                input, label { font-size: 16px; margin: 5px; }
+              body { font-family: Arial, sans-serif; margin: 40px; }
+              input, label { font-size: 16px; margin: 5px; }
             </style>
         </head>
         <body>
@@ -84,30 +40,49 @@ class TournamentRequestHandler(http.server.SimpleHTTPRequestHandler):
         </body>
         </html>
         """
+    else:
+        # Handle form submission via POST
+        match_id = request.form.get("match_id")
+        score1 = request.form.get("score1")
+        score2 = request.form.get("score2")
+        
+        if not match_id or score1 is None or score2 is None:
+            abort(400, "Missing required fields")
+        
+        try:
+            score1 = int(score1)
+            score2 = int(score2)
+        except ValueError:
+            abort(400, "Scores must be integers")
+        
+        # Attempt to save the result into the database.
+        if not save_result(match_id, score1, score2):
+            abort(409, "Result for this match has already been submitted or match ID is invalid")
+        
+        return "Result submitted successfully", 200
 
-    def save_result(self, match_id, score1, score2):
-        """ Saves match results into the SQLite database """
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-
-        # Check if the match exists
-        cursor.execute("SELECT * FROM match_results WHERE match_id = ?", (match_id,))
-        existing_match = cursor.fetchone()
-
-        if existing_match:
-            conn.close()
-            return False  # Match result already exists
-
-        # Insert the new match result
-        cursor.execute("INSERT INTO match_results (match_id, score1, score2) VALUES (?, ?, ?)",
-                       (match_id, score1, score2))
-        conn.commit()
+def save_result(match_id, score1, score2):
+    """
+    Save the match result to a SQLite database.
+    This example assumes you have a table named 'match_results'
+    with columns 'match_id', 'score1', and 'score2'.
+    """
+    db_file = "tournament.db"  # Adjust this if your database is located elsewhere.
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    
+    # Check if a result for this match_id already exists.
+    cursor.execute("SELECT * FROM match_results WHERE match_id = ?", (match_id,))
+    if cursor.fetchone():
         conn.close()
-        return True
+        return False
 
-# Start the server
-handler = TournamentRequestHandler
-socketserver.TCPServer.allow_reuse_address = True
-with socketserver.TCPServer(("", PORT), handler) as httpd:
-    print(f"Serving HTTP at port {PORT}")
-    httpd.serve_forever()
+    # Insert the result
+    cursor.execute("INSERT INTO match_results (match_id, score1, score2) VALUES (?, ?, ?)",
+                   (match_id, score1, score2))
+    conn.commit()
+    conn.close()
+    return True
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
