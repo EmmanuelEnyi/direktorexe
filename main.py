@@ -59,7 +59,8 @@ all_currencies = [
 ]
 
 server_thread = None
-HTTP_PORT = 8000
+import os
+HTTP_PORT = int(os.environ.get("PORT", 8000))
 current_tournament_id = None
 session_players = []
 prize_table = []
