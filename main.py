@@ -7,14 +7,14 @@ Features:
   • Tournament Setup with tournament name, date, and venue.
   • Automatic generation of a tournament folder (inside “rendered/tournaments”) based on the tournament name.
   • All HTML outputs (index, roster, standings, prize table, pairing pages) are generated into that folder so that relative links work correctly.
-  • An HTTP server is started and shareable URLs are generated using the public IP or domain provided by the user.
-  • The "Enter Results" tab now lets the user manually enter or update match scores for each pairing.
+  • A Flask web server is started and shareable URLs are generated using the public IP or a custom domain provided by the user.
+  • The "Enter Results" tab lets the user manually enter or update match scores for each pairing.
   • The Prize Table tab provides a UI for setting up both monetary and non‑monetary prizes (with a searchable currency selector).
   • The Event Coverage Index is regenerated on demand (when clicking Render) to reflect the latest data.
   • In the Pairings tab, when the Round Robin system is chosen, a dialog asks the user for the number of rounds to generate; the system now generates exactly that many rounds.
   • The preview box in the Pairings tab shows the entire round robin schedule.
   • A new "FTP Settings" tab lets the user enter FTP Host, Username, and Password. When the user clicks "Mirror Website", the tournament folder is uploaded via FTP to their host, and the shareable link is updated.
-  • A new remote results submission feature is added:
+  • A new remote results submission feature is added via Flask:
        – A custom HTTP endpoint (/submit_results) is served.
        – Players can access a web form to paste their match ID and submit scores.
        – The system validates submissions (including duplicate checking) and updates tournament results.
@@ -23,7 +23,7 @@ Features:
        – “Load Tournament” lets the user resume a saved tournament.
        – “Quit App” exits the application.
   • Overall UX enhancements include improved layout, clear feedback messages, tooltips, and robust error handling.
-  
+
 Author: Manuelito
 """
 
@@ -59,7 +59,6 @@ all_currencies = [
 ]
 
 server_thread = None
-import os
 HTTP_PORT = int(os.environ.get("PORT", 8000))
 current_tournament_id = None
 session_players = []
@@ -80,7 +79,7 @@ status_label = None
 main_frame_global = None
 shareable_link = ""
 full_round_robin_schedule = None
-public_ip = ""  # Will store public IP or domain
+public_ip = ""  # Will store public IP or custom domain
 
 header_html = """<head>
   <meta charset="UTF-8">
@@ -137,139 +136,12 @@ def get_local_ip():
     return ip
 
 ##################################
-# Custom HTTP Handler for Remote Results Submission
-##################################
-class ResultsSubmissionHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/submit_results"):
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>Submit Match Results</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 40px; }
-                input, label { font-size: 16px; margin: 5px; }
-              </style>
-            </head>
-            <body>
-              <h2>Submit Match Results</h2>
-              <form method="POST" action="/submit_results">
-                <label for="match_id">Match ID (e.g., R1-M2):</label><br>
-                <input type="text" id="match_id" name="match_id" required><br><br>
-                <label for="score1">Score for Player 1:</label><br>
-                <input type="number" id="score1" name="score1" required><br><br>
-                <label for="score2">Score for Player 2:</label><br>
-                <input type="number" id="score2" name="score2" required><br><br>
-                <input type="submit" value="Submit Results">
-              </form>
-            </body>
-            </html>
-            """
-            self.wfile.write(html.encode())
-        else:
-            super().do_GET()
-
-    def do_POST(self):
-        if self.path.startswith("/submit_results"):
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            import urllib.parse
-            fields = urllib.parse.parse_qs(post_data.decode())
-            match_id = fields.get('match_id', [None])[0]
-            score1 = fields.get('score1', [None])[0]
-            score2 = fields.get('score2', [None])[0]
-            if not match_id or score1 is None or score2 is None:
-                self.send_response(400)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Missing required fields.")
-                return
-            try:
-                score1 = int(score1)
-                score2 = int(score2)
-            except ValueError:
-                self.send_response(400)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Scores must be integers.")
-                return
-            try:
-                parts = match_id.split('-')
-                round_part = parts[0]  # e.g., "R1"
-                match_part = parts[1]  # e.g., "M2"
-                round_num = int(round_part[1:])
-                match_index = int(match_part[1:]) - 1  # zero-based index
-            except Exception:
-                self.send_response(400)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Invalid match ID format. Use R#-M# format.")
-                return
-            from __main__ import current_tournament_id, completed_rounds, results_by_round, recalc_player_stats
-            if current_tournament_id is None:
-                self.send_response(400)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"No tournament loaded.")
-                return
-            if round_num not in completed_rounds:
-                self.send_response(400)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Round not found.")
-                return
-            round_pairings = completed_rounds[round_num]
-            if match_index < 0 or match_index >= len(round_pairings):
-                self.send_response(400)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Invalid match number.")
-                return
-            if round_num in results_by_round and len(results_by_round[round_num]) > match_index and results_by_round[round_num][match_index] is not None:
-                self.send_response(409)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"Result for this match has already been submitted.")
-                return
-            if round_num not in results_by_round:
-                results_by_round[round_num] = [None] * len(round_pairings)
-            results_by_round[round_num][match_index] = (score1, score2)
-            recalc_player_stats()
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"Result submitted successfully.")
-        else:
-            super().do_POST()
-
-##################################
-# Custom HTTP Server Startup
-##################################
-def run_http_server_custom(port=HTTP_PORT):
-    rendered_dir = os.path.join(os.getcwd(), "rendered")
-    handler = partial(ResultsSubmissionHandler, directory=rendered_dir)
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", port), handler) as httpd:
-        print(f"Serving HTTP at port {port} with remote submission enabled")
-        httpd.serve_forever()
-
-def start_http_server_custom(port=HTTP_PORT):
-    global server_thread
-    if server_thread is None:
-        server_thread = threading.Thread(target=run_http_server_custom, args=(port,), daemon=True)
-        server_thread.start()
-
-##################################
-# Database and Save/Load Functions
+# Database & Save/Load Functions
 ##################################
 def update_tournament_link(tournament_id, link):
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE tournaments SET link = ? WHERE id = ?", (link, tournament_id))
+    cursor.execute("UPDATE tournaments SET shareable_link = ? WHERE id = ?", (link, tournament_id))
     conn.commit()
     conn.close()
 
@@ -280,7 +152,7 @@ def save_current_tournament():
         return
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, date, venue, link FROM tournaments WHERE id = ?", (current_tournament_id,))
+    cursor.execute("SELECT id, name, date, venue, shareable_link FROM tournaments WHERE id = ?", (current_tournament_id,))
     tournament_data = cursor.fetchone()
     players = get_players_for_tournament(current_tournament_id)
     conn.close()
@@ -898,6 +770,89 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     with open(index_path, "w", encoding="utf-8") as f:
         f.write(index_html)
     return index_path
+
+##################################
+# Flask Application for Remote Results & Coverage
+##################################
+from flask import Flask, send_from_directory, request, abort, redirect
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def flask_index():
+    latest = get_latest_tournament_folder()
+    if latest:
+        return redirect(f"/tournament/{latest}")
+    else:
+        abort(404, "No tournament coverage found.")
+
+@flask_app.route("/tournament/<tournament_name>")
+def flask_tournament_index(tournament_name):
+    folder = os.path.join("rendered", "tournaments", tournament_name)
+    if os.path.exists(os.path.join(folder, "index.html")):
+        return send_from_directory(folder, "index.html")
+    else:
+        abort(404, f"Tournament '{tournament_name}' not found.")
+
+@flask_app.route("/tournament/<tournament_name>/<path:filename>")
+def flask_tournament_files(tournament_name, filename):
+    folder = os.path.join("rendered", "tournaments", tournament_name)
+    if os.path.exists(os.path.join(folder, filename)):
+        return send_from_directory(folder, filename)
+    else:
+        abort(404, f"File '{filename}' not found in tournament '{tournament_name}'.")
+
+@flask_app.route("/submit_results", methods=["GET", "POST"])
+def flask_submit_results():
+    if request.method == "GET":
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Submit Match Results</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                input, label { font-size: 16px; margin: 5px; }
+            </style>
+        </head>
+        <body>
+            <h2>Submit Match Results</h2>
+            <form method="POST" action="/submit_results">
+                <label for="match_id">Match ID (e.g., R1-M2):</label><br>
+                <input type="text" id="match_id" name="match_id" required><br><br>
+                <label for="score1">Score for Player 1:</label><br>
+                <input type="number" id="score1" name="score1" required><br><br>
+                <label for="score2">Score for Player 2:</label><br>
+                <input type="number" id="score2" name="score2" required><br><br>
+                <input type="submit" value="Submit Results">
+            </form>
+        </body>
+        </html>
+        """
+    else:
+        match_id = request.form.get("match_id")
+        score1 = request.form.get("score1")
+        score2 = request.form.get("score2")
+        if not match_id or score1 is None or score2 is None:
+            abort(400, "Missing required fields")
+        try:
+            score1 = int(score1)
+            score2 = int(score2)
+        except ValueError:
+            abort(400, "Scores must be integers")
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM results WHERE match_id = ?", (match_id,))
+        if cursor.fetchone():
+            conn.close()
+            abort(409, "Result for this match has already been submitted")
+        cursor.execute("INSERT INTO results (match_id, player1_score, player2_score) VALUES (?, ?, ?)",
+                       (match_id, score1, score2))
+        conn.commit()
+        conn.close()
+        return "Result submitted successfully", 200
+
+def run_flask_app():
+    flask_app.run(host="0.0.0.0", port=HTTP_PORT)
 
 ##################################
 # FTP Functions
@@ -1534,19 +1489,154 @@ def switch_mode_toggle():
     show_toast(app, f"Switched to {current_mode_view.capitalize()} Mode.")
 
 ##################################
+# Flask Application for Coverage & Remote Results
+##################################
+from flask import Flask, send_from_directory, request, abort, redirect
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def flask_index():
+    latest = get_latest_tournament_folder()
+    if latest:
+        return redirect(f"/tournament/{latest}")
+    else:
+        abort(404, "No tournament coverage found.")
+
+@flask_app.route("/tournament/<tournament_name>")
+def flask_tournament_index(tournament_name):
+    folder = os.path.join("rendered", "tournaments", tournament_name)
+    if os.path.exists(os.path.join(folder, "index.html")):
+        return send_from_directory(folder, "index.html")
+    else:
+        abort(404, f"Tournament '{tournament_name}' not found.")
+
+@flask_app.route("/tournament/<tournament_name>/<path:filename>")
+def flask_tournament_files(tournament_name, filename):
+    folder = os.path.join("rendered", "tournaments", tournament_name)
+    if os.path.exists(os.path.join(folder, filename)):
+        return send_from_directory(folder, filename)
+    else:
+        abort(404, f"File '{filename}' not found in tournament '{tournament_name}'.")
+
+@flask_app.route("/submit_results", methods=["GET", "POST"])
+def flask_submit_results():
+    if request.method == "GET":
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Submit Match Results</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                input, label { font-size: 16px; margin: 5px; }
+            </style>
+        </head>
+        <body>
+            <h2>Submit Match Results</h2>
+            <form method="POST" action="/submit_results">
+                <label for="match_id">Match ID (e.g., R1-M2):</label><br>
+                <input type="text" id="match_id" name="match_id" required><br><br>
+                <label for="score1">Score for Player 1:</label><br>
+                <input type="number" id="score1" name="score1" required><br><br>
+                <label for="score2">Score for Player 2:</label><br>
+                <input type="number" id="score2" name="score2" required><br><br>
+                <input type="submit" value="Submit Results">
+            </form>
+        </body>
+        </html>
+        """
+    else:
+        match_id = request.form.get("match_id")
+        score1 = request.form.get("score1")
+        score2 = request.form.get("score2")
+        if not match_id or score1 is None or score2 is None:
+            abort(400, "Missing required fields")
+        try:
+            score1 = int(score1)
+            score2 = int(score2)
+        except ValueError:
+            abort(400, "Scores must be integers")
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM results WHERE match_id = ?", (match_id,))
+        if cursor.fetchone():
+            conn.close()
+            abort(409, "Result for this match has already been submitted")
+        cursor.execute("INSERT INTO results (match_id, player1_score, player2_score) VALUES (?, ?, ?)",
+                       (match_id, score1, score2))
+        conn.commit()
+        conn.close()
+        return "Result submitted successfully", 200
+
+def run_flask_app():
+    flask_app.run(host="0.0.0.0", port=HTTP_PORT)
+
+##################################
+# FTP Functions
+##################################
+def ftp_upload_dir(ftp, local_dir, remote_dir):
+    try:
+        ftp.mkd(remote_dir)
+    except Exception:
+        pass
+    for item in os.listdir(local_dir):
+        local_path = os.path.join(local_dir, item)
+        remote_path = f"{remote_dir}/{item}"
+        if os.path.isfile(local_path):
+            with open(local_path, "rb") as f:
+                ftp.storbinary(f"STOR {remote_path}", f)
+        elif os.path.isdir(local_path):
+            ftp_upload_dir(ftp, local_path, remote_path)
+
+def mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass):
+    try:
+        ftp = ftplib.FTP(ftp_host)
+        ftp.login(ftp_user, ftp_pass)
+    except Exception as e:
+        messagebox.showerror("FTP Error", f"FTP login failed: {e}")
+        return None
+    if current_tournament_id is None:
+        messagebox.showerror("Error", "No tournament loaded.")
+        return None
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM tournaments WHERE id = ?", (current_tournament_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if not result:
+        messagebox.showerror("Error", "Tournament not found.")
+        return None
+    tournament_name = result[0]
+    local_dir = get_tournament_folder(tournament_name)
+    remote_dir = tournament_name.replace(" ", "_")
+    ftp_upload_dir(ftp, local_dir, remote_dir)
+    ftp.quit()
+    new_link = f"http://{ftp_host}/{remote_dir}/index.html"
+    return new_link
+
+##################################
 # Main Application Entry Point with Sidebar
 ##################################
+def setup_sidebar(root):
+    sidebar = ctk.CTkFrame(root, width=200, corner_radius=0)
+    sidebar.grid(row=0, column=0, sticky="nswe")
+    save_button = ctk.CTkButton(sidebar, text="Save Tournament", command=save_current_tournament)
+    save_button.pack(pady=10, padx=20)
+    load_button = ctk.CTkButton(sidebar, text="Load Tournament", command=load_tournament)
+    load_button.pack(pady=10, padx=20)
+    quit_button = ctk.CTkButton(sidebar, text="Quit App", command=quit_app)
+    quit_button.pack(pady=10, padx=20)
+
 if __name__ == "__main__":
+    # Initialize Tkinter GUI
     app = ctk.CTk()
     app.title("Direktor EXE – Scrabble Tournament Manager")
     app.geometry("1200x800")
-    
     app.grid_columnconfigure(1, weight=1)
     app.grid_rowconfigure(0, weight=1)
     
     sidebar_frame = ctk.CTkFrame(app, width=200, corner_radius=0)
     sidebar_frame.grid(row=0, column=0, sticky="nswe")
-    
     save_button = ctk.CTkButton(sidebar_frame, text="Save Tournament", command=save_current_tournament)
     save_button.pack(pady=10, padx=20)
     load_button = ctk.CTkButton(sidebar_frame, text="Load Tournament", command=load_tournament)
@@ -1558,7 +1648,10 @@ if __name__ == "__main__":
     main_frame_global.grid(row=0, column=1, sticky="nsew")
     
     initialize_database()
-    start_http_server_custom(HTTP_PORT)
+    
+    # Start the Flask server (for tournament coverage and remote results) in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
+    flask_thread.start()
     
     build_tab_view(main_frame_global)
     
