@@ -27,9 +27,9 @@ Features:
 Author: Manuelito
 """
 
-#############################
+##################################
 # Imports and Global Variables
-#############################
+##################################
 import customtkinter as ctk
 import os, re, shutil, webbrowser, sqlite3, threading, http.server, socketserver, socket, random, json, ftplib
 import tkinter.filedialog as fd
@@ -779,7 +779,15 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def flask_index():
-    latest = get_latest_tournament_folder()
+    latest = None
+    # Simple logic: use the folder name of the tournament with the highest id
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM tournaments ORDER BY id DESC LIMIT 1")
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        latest = result[0].replace(" ", "_")
     if latest:
         return redirect(f"/tournament/{latest}")
     else:
@@ -839,7 +847,9 @@ def flask_submit_results():
             score2 = int(score2)
         except ValueError:
             abort(400, "Scores must be integers")
-        conn = sqlite3.connect(DB_FILE)
+        # For simplicity, we'll use the local database file (adjust if needed)
+        db_file = "direktor.db"
+        conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM results WHERE match_id = ?", (match_id,))
         if cursor.fetchone():
@@ -1503,7 +1513,14 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def flask_index():
-    latest = get_latest_tournament_folder()
+    latest = None
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM tournaments ORDER BY id DESC LIMIT 1")
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        latest = result[0].replace(" ", "_")
     if latest:
         return redirect(f"/tournament/{latest}")
     else:
@@ -1563,7 +1580,8 @@ def flask_submit_results():
             score2 = int(score2)
         except ValueError:
             abort(400, "Scores must be integers")
-        conn = sqlite3.connect(DB_FILE)
+        db_file = "direktor.db"
+        conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM results WHERE match_id = ?", (match_id,))
         if cursor.fetchone():
@@ -1620,6 +1638,42 @@ def mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass):
     ftp.quit()
     new_link = f"http://{ftp_host}/{remote_dir}/index.html"
     return new_link
+
+##################################
+# UI Functions: FTP Settings Tab
+##################################
+def setup_ftp_settings(tab_frame):
+    label = ctk.CTkLabel(tab_frame, text="FTP Settings", font=("Arial", 18))
+    label.pack(pady=10)
+    
+    host_label = ctk.CTkLabel(tab_frame, text="FTP Host:")
+    host_label.pack(pady=5)
+    host_entry = ctk.CTkEntry(tab_frame)
+    host_entry.pack(pady=5)
+    
+    user_label = ctk.CTkLabel(tab_frame, text="FTP Username:")
+    user_label.pack(pady=5)
+    user_entry = ctk.CTkEntry(tab_frame)
+    user_entry.pack(pady=5)
+    
+    pass_label = ctk.CTkLabel(tab_frame, text="FTP Password:")
+    pass_label.pack(pady=5)
+    pass_entry = ctk.CTkEntry(tab_frame, show="*")
+    pass_entry.pack(pady=5)
+    
+    def mirror_action():
+        ftp_host = host_entry.get().strip()
+        ftp_user = user_entry.get().strip()
+        ftp_pass = pass_entry.get().strip()
+        if not ftp_host or not ftp_user or not ftp_pass:
+            messagebox.showerror("Error", "Please fill in all FTP fields.")
+            return
+        new_link = mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass)
+        if new_link:
+            messagebox.showinfo("Success", f"Website mirrored successfully!\nShareable link: {new_link}")
+    
+    mirror_button = ctk.CTkButton(tab_frame, text="Mirror Website", command=mirror_action)
+    mirror_button.pack(pady=10)
 
 ##################################
 # Main Application Entry Point with Sidebar
