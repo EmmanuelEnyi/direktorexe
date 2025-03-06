@@ -23,7 +23,7 @@ Features:
        – “Load Tournament” lets the user resume a saved tournament.
        – “Quit App” exits the application.
   • Overall UX enhancements include improved layout, clear feedback messages, tooltips, and robust error handling.
-
+  
 Author: Manuelito
 """
 
@@ -36,7 +36,7 @@ import tkinter.filedialog as fd
 import tkinter.messagebox as messagebox
 import tkinter.simpledialog as simpledialog
 from functools import partial
-from data.database import create_connection, create_tables, insert_player, insert_tournament, get_all_tournaments, get_all_players
+from data.database import create_connection, create_tables, insert_player, insert_tournament, get_all_tournaments, get_all_players, get_players_for_tournament
 
 all_currencies = [
     "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
@@ -254,7 +254,7 @@ def initialize_database():
 def get_players_for_tournament(tournament_id):
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, rating, wins, losses, spread, last_result, scorecard, team FROM players WHERE tournament_id = ?", (tournament_id,))
+    cursor.execute("SELECT * FROM players WHERE tournament_id = ?", (tournament_id,))
     players = cursor.fetchall()
     conn.close()
     return players
@@ -772,7 +772,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     return index_path
 
 ##################################
-# Flask Application for Remote Results & Coverage
+# Flask Application for Coverage & Remote Results
 ##################################
 from flask import Flask, send_from_directory, request, abort, redirect
 flask_app = Flask(__name__)
@@ -1067,9 +1067,13 @@ def open_event_index():
     final_index = finalize_tournament_html(tname, generated_index)
     rendered_dir = os.path.join(os.getcwd(), "rendered")
     relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
+    # Use custom domain if provided; otherwise, fallback to Render domain
     if not public_ip:
-        public_ip = get_local_ip()
-    url = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
+        public_ip = "direktorexe.onrender.com"
+    if public_ip.startswith("http://") or public_ip.startswith("https://"):
+        url = f"{public_ip}/{relative_path}"
+    else:
+        url = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
     webbrowser.open(url)
 
 ##################################
@@ -1260,10 +1264,13 @@ def setup_tournament_setup(tab_frame):
             rendered_dir = os.path.join(os.getcwd(), "rendered")
             relative_path = os.path.relpath(final_file, rendered_dir).replace(os.sep, '/')
             public_ip = simpledialog.askstring("Public IP or Domain", 
-                "Enter the public IP or domain for players to access (leave blank for local access):")
+                "Enter the public IP or domain for players to access (leave blank to use the Render domain):")
             if not public_ip:
-                public_ip = get_local_ip()
-            shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
+                public_ip = "direktorexe.onrender.com"
+            if public_ip.startswith("http://") or public_ip.startswith("https://"):
+                shareable_link = f"{public_ip}/{relative_path}"
+            else:
+                shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
             update_tournament_link(tournament_id, shareable_link)
             show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
             print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_link}")
