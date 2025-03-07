@@ -11,8 +11,7 @@ Features:
   • The "Enter Results" tab lets the user manually enter or update match scores for each pairing.
   • The Prize Table tab provides a UI for setting up both monetary and non‑monetary prizes (with a searchable currency selector).
   • The Event Coverage Index is regenerated on demand (when clicking Render) to reflect the latest data.
-  • In the Pairings tab, when the Round Robin system is chosen, a dialog asks the user for the number of rounds to generate; the system now generates exactly that many rounds.
-  • The preview box in the Pairings tab shows the entire round robin schedule.
+  • In the Pairings tab, when the Round Robin system is chosen, a dialog asks the user for the number of rounds to generate; the system now generates exactly that many rounds and displays a full preview.
   • A new "FTP Settings" tab lets the user enter FTP Host, Username, and Password. When the user clicks "Mirror Website", the tournament folder is uploaded via FTP to their host, and the shareable link is updated.
   • A new remote results submission feature is added via Flask:
        – A custom HTTP endpoint (/submit_results) is served.
@@ -22,6 +21,7 @@ Features:
        – “Save Tournament” saves the complete tournament progress as a .TOU file.
        – “Load Tournament” lets the user resume a saved tournament.
        – “Quit App” exits the application.
+  • **New:** When a new tournament is created, player IDs (i.e. the numbering for players) reset so that the first player is numbered 1.
   • Overall UX enhancements include improved layout, clear feedback messages, tooltips, and robust error handling.
   
 Author: Manuelito
@@ -743,6 +743,11 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
   </div>
 </nav>"""
     footer_section = '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
+    folder_name = re.sub(r'[\\/*?:"<>|]', "", tournament_name).replace(" ", "_")
+    if public_ip.startswith("http://") or public_ip.startswith("https://"):
+        shareable = f"{public_ip}/tournament/{folder_name}"
+    else:
+        shareable = f"http://{public_ip}:{HTTP_PORT}/tournament/{folder_name}"
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -760,6 +765,8 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </ul>
     <br>
     <a href="/submit_results" class="btn btn-primary">Submit Results</a>
+    <br><br>
+    <p>Shareable URL: <a href="{shareable}">{shareable}</a></p>
   </div>
   {footer_section}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -780,14 +787,13 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def flask_index():
     latest = None
-    # Simple logic: use the folder name of the tournament with the highest id
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM tournaments ORDER BY id DESC LIMIT 1")
     result = cursor.fetchone()
     conn.close()
     if result:
-        latest = result[0].replace(" ", "_")
+        latest = re.sub(r'[\\/*?:"<>|]', "", result[0]).replace(" ", "_")
     if latest:
         return redirect(f"/tournament/{latest}")
     else:
@@ -847,7 +853,6 @@ def flask_submit_results():
             score2 = int(score2)
         except ValueError:
             abort(400, "Scores must be integers")
-        # For simplicity, we'll use the local database file (adjust if needed)
         db_file = "direktor.db"
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
@@ -913,22 +918,18 @@ def mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass):
 def setup_ftp_settings(tab_frame):
     label = ctk.CTkLabel(tab_frame, text="FTP Settings", font=("Arial", 18))
     label.pack(pady=10)
-    
     host_label = ctk.CTkLabel(tab_frame, text="FTP Host:")
     host_label.pack(pady=5)
     host_entry = ctk.CTkEntry(tab_frame)
     host_entry.pack(pady=5)
-    
     user_label = ctk.CTkLabel(tab_frame, text="FTP Username:")
     user_label.pack(pady=5)
     user_entry = ctk.CTkEntry(tab_frame)
     user_entry.pack(pady=5)
-    
     pass_label = ctk.CTkLabel(tab_frame, text="FTP Password:")
     pass_label.pack(pady=5)
     pass_entry = ctk.CTkEntry(tab_frame, show="*")
     pass_entry.pack(pady=5)
-    
     def mirror_action():
         ftp_host = host_entry.get().strip()
         ftp_user = user_entry.get().strip()
@@ -939,7 +940,6 @@ def setup_ftp_settings(tab_frame):
         new_link = mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass)
         if new_link:
             messagebox.showinfo("Success", f"Website mirrored successfully!\nShareable link: {new_link}")
-    
     mirror_button = ctk.CTkButton(tab_frame, text="Mirror Website", command=mirror_action)
     mirror_button.pack(pady=10)
 
@@ -1077,7 +1077,6 @@ def open_event_index():
     final_index = finalize_tournament_html(tname, generated_index)
     rendered_dir = os.path.join(os.getcwd(), "rendered")
     relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
-    # Use custom domain if provided; otherwise, fallback to Render domain
     if not public_ip:
         public_ip = "direktorexe.onrender.com"
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
@@ -1278,9 +1277,9 @@ def setup_tournament_setup(tab_frame):
             if not public_ip:
                 public_ip = "direktorexe.onrender.com"
             if public_ip.startswith("http://") or public_ip.startswith("https://"):
-                shareable_link = f"{public_ip}/{relative_path}"
+                shareable_link = f"{public_ip}/tournament/{re.sub(r'[\\/*?:"<>|]', '', name).replace(' ', '_')}"
             else:
-                shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
+                shareable_link = f"http://{public_ip}:{HTTP_PORT}/tournament/{re.sub(r'[\\/*?:"<>|]', '', name).replace(' ', '_')}"
             update_tournament_link(tournament_id, shareable_link)
             show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
             print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_link}")
@@ -1349,7 +1348,10 @@ def setup_player_registration(tab_frame):
                 show_toast(tab_frame, "Please select a team.")
                 return
         conn = create_connection()
-        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team)
+        # Reset player numbering for each tournament: next number = count + 1
+        current_players = get_players_for_tournament(current_tournament_id)
+        next_player_number = len(current_players) + 1
+        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team, next_player_number)
         conn.close()
         show_toast(tab_frame, f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
         print(f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
@@ -1483,7 +1485,17 @@ def build_tab_view(parent):
         if current_mode_view in ("general", "team") and tab in ("Pairings", "Team Pairings"):
             setup_pairings(tab_view.tab(tab))
         elif tab in ("Reports & Exports", "Render", "FTP Settings"):
-            setup_tab_content_without_save(tab_view.tab(tab), tab)
+            def setup_without_save(frame, tname=tab):
+                if tname == "Reports & Exports":
+                    setup_reports(frame)
+                elif tname == "Render":
+                    setup_render(frame)
+                elif tname == "FTP Settings":
+                    setup_ftp_settings(frame)
+                else:
+                    label = ctk.CTkLabel(frame, text=tname, font=("Arial", 18))
+                    label.pack(pady=20)
+            setup_without_save(tab_view.tab(tab))
         else:
             setup_tab_content(tab, tab_view.tab(tab))
     return tab_view
@@ -1520,7 +1532,7 @@ def flask_index():
     result = cursor.fetchone()
     conn.close()
     if result:
-        latest = result[0].replace(" ", "_")
+        latest = re.sub(r'[\\/*?:"<>|]', "", result[0]).replace(" ", "_")
     if latest:
         return redirect(f"/tournament/{latest}")
     else:
@@ -1645,22 +1657,18 @@ def mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass):
 def setup_ftp_settings(tab_frame):
     label = ctk.CTkLabel(tab_frame, text="FTP Settings", font=("Arial", 18))
     label.pack(pady=10)
-    
     host_label = ctk.CTkLabel(tab_frame, text="FTP Host:")
     host_label.pack(pady=5)
     host_entry = ctk.CTkEntry(tab_frame)
     host_entry.pack(pady=5)
-    
     user_label = ctk.CTkLabel(tab_frame, text="FTP Username:")
     user_label.pack(pady=5)
     user_entry = ctk.CTkEntry(tab_frame)
     user_entry.pack(pady=5)
-    
     pass_label = ctk.CTkLabel(tab_frame, text="FTP Password:")
     pass_label.pack(pady=5)
     pass_entry = ctk.CTkEntry(tab_frame, show="*")
     pass_entry.pack(pady=5)
-    
     def mirror_action():
         ftp_host = host_entry.get().strip()
         ftp_user = user_entry.get().strip()
@@ -1671,7 +1679,6 @@ def setup_ftp_settings(tab_frame):
         new_link = mirror_website_via_ftp(ftp_host, ftp_user, ftp_pass)
         if new_link:
             messagebox.showinfo("Success", f"Website mirrored successfully!\nShareable link: {new_link}")
-    
     mirror_button = ctk.CTkButton(tab_frame, text="Mirror Website", command=mirror_action)
     mirror_button.pack(pady=10)
 
@@ -1713,6 +1720,91 @@ if __name__ == "__main__":
     # Start the Flask server (for tournament coverage and remote results) in a separate thread
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
+    
+    # Build the main tab view
+    def build_tab_view(parent):
+        if current_mode_view == "general":
+            tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render", "FTP Settings"]
+        elif current_mode_view == "team":
+            tabs = ["Tournament Setup", "Player Registration", "Team Pairings", "Team Results", "Prize Table", "Render", "FTP Settings"]
+        else:
+            tabs = []
+        tab_view = ctk.CTkTabview(parent, width=880, height=700)
+        tab_view.pack(fill="both", expand=True)
+        for tab in tabs:
+            tab_view.add(tab)
+            if current_mode_view in ("general", "team") and tab in ("Pairings", "Team Pairings"):
+                setup_pairings(tab_view.tab(tab))
+            elif tab in ("Reports & Exports", "Render", "FTP Settings"):
+                def setup_without_save(frame, tname=tab):
+                    if tname == "Reports & Exports":
+                        setup_reports(frame)
+                    elif tname == "Render":
+                        setup_render(frame)
+                    elif tname == "FTP Settings":
+                        setup_ftp_settings(frame)
+                    else:
+                        label = ctk.CTkLabel(frame, text=tname, font=("Arial", 18))
+                        label.pack(pady=20)
+                setup_without_save(tab_view.tab(tab))
+            else:
+                setup_tab_content(tab, tab_view.tab(tab))
+        return tab_view
+    
+    def rebuild_tab_view():
+        global main_frame_global
+        for widget in main_frame_global.winfo_children():
+            widget.destroy()
+        return build_tab_view(main_frame_global)
+    
+    def switch_mode_toggle():
+        global current_mode_view, tournament_mode
+        if current_mode_view == "general":
+            current_mode_view = "team"
+            tournament_mode = "Team Round Robin"
+        else:
+            current_mode_view = "general"
+            tournament_mode = "General"
+        rebuild_tab_view()
+        show_toast(app, f"Switched to {current_mode_view.capitalize()} Mode.")
+    
+    def setup_tab_content_without_save(tab_frame, tab_name):
+        if tab_name in ("Reports & Exports", "Render", "FTP Settings"):
+            if tab_name == "Reports & Exports":
+                setup_reports(tab_frame)
+            elif tab_name == "Render":
+                setup_render(tab_frame)
+            else:
+                setup_ftp_settings(tab_frame)
+        else:
+            label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
+            label.pack(pady=20)
+    
+    def setup_tab_content(tab_name, tab_frame):
+        if tab_name == "Tournament Setup":
+            setup_tournament_setup(tab_frame)
+        elif tab_name == "Player Registration":
+            setup_player_registration(tab_frame)
+        elif tab_name in ("Pairings", "Team Pairings"):
+            setup_pairings(tab_frame)
+        elif tab_name == "Enter Results":
+            setup_enter_results(tab_frame)
+        elif tab_name == "Prize Table":
+            setup_prize_table(tab_frame)
+        elif tab_name in ("Reports & Exports", "Render"):
+            if tab_name == "Reports & Exports":
+                setup_reports(tab_frame)
+            else:
+                setup_render(tab_frame)
+        elif tab_name == "FTP Settings":
+            setup_ftp_settings(tab_frame)
+        else:
+            label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
+            label.pack(pady=20)
+        def save_tab():
+            show_toast(tab_frame, "Tab data saved.")
+        tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
+        tab_save_button.pack(pady=5)
     
     build_tab_view(main_frame_global)
     
