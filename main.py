@@ -510,6 +510,26 @@ def generate_player_scorecard_html(player, tournament_id, out_folder):
 
 def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     out_folder = get_tournament_folder(tournament_name)
+    # Derive the folder name from the out_folder path:
+    folder_name = os.path.basename(out_folder)
+    # Build the base href using your Render domain:
+    base_href = f"https://direktorexe.onrender.com/tournaments/{folder_name}/"
+    # Create a new header that includes the <base> tag:
+    header = f"""<head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Tournament</title>
+      <base href="{base_href}">
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+      <style>
+        body {{ background-color: #f8f9fa; color: #343a40; }}
+        .container-custom {{ max-width:800px; margin:auto; }}
+        footer {{ margin-top: 40px; font-size: 0.9em; text-align: center; padding: 20px 0; }}
+      </style>
+    </head>"""
+    # Continue with the rest of your function here, using 'header' instead of a global header_html
+    # For example, use header when constructing the HTML output:
+    # (rest of function code follows here)
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT name, date, venue FROM tournaments WHERE id = ?", (tournament_id,))
@@ -1046,9 +1066,12 @@ def open_event_index():
     rendered_dir = os.path.join(os.getcwd(), "rendered")
     relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
     if not public_ip:
-    public_ip = "https://direktorexe.onrender.com"
+        public_ip = "https://direktorexe.onrender.com"
+    # If a custom domain is used, assume it already includes http:// or https://
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
-        url = f"{public_ip}/{relative_path}"
+        # Ensure the path uses the plural "tournaments" if that's how your Flask route is defined.
+        folder_name = re.sub(r'[\\/*?:"<>|]', "", tname).replace(" ", "_")
+        url = f"{public_ip}/tournaments/{folder_name}/index.html"
     else:
         url = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
     webbrowser.open(url)
