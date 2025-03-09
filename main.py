@@ -21,9 +21,11 @@ Features:
        – “Save Tournament” saves the complete tournament progress as a .TOU file.
        – “Load Tournament” lets the user resume a saved tournament.
        – “Quit App” exits the application.
-  • **New:** When a new tournament is created, player numbering resets (so that the first player added gets number 1).
+  • **New:** When a new tournament is created, player numbering resets (the first player added gets player_number 1 for that tournament).
+  • **New:** In player registration, an optional “Country” field is provided. When set, the player’s country (or flag) is shown next to their name in all HTML outputs.
+  • **New:** An optional footer banner is added to every generated HTML page to display sponsor logos (if the global variable sponsor_logos is set).
   • Overall UX enhancements include improved layout, clear feedback messages, tooltips, and robust error handling.
-  
+
 Author: Manuelito
 """
 
@@ -31,13 +33,14 @@ Author: Manuelito
 # Imports and Global Variables
 ##################################
 import customtkinter as ctk
-import os, re, shutil, webbrowser, sqlite3, threading, http.server, socketserver, socket, random, json, ftplib
+import os, re, shutil, webbrowser, sqlite3, threading, socket, random, json, ftplib
 import tkinter.filedialog as fd
 import tkinter.messagebox as messagebox
 import tkinter.simpledialog as simpledialog
 from functools import partial
 from data.database import create_connection, create_tables, insert_player, insert_tournament, get_all_tournaments, get_all_players, get_players_for_tournament
 
+# Global list of currency codes for prize setup
 all_currencies = [
     "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
     "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL",
@@ -58,6 +61,7 @@ all_currencies = [
     "ZMW", "ZWL"
 ]
 
+# Global variables for state management
 server_thread = None
 HTTP_PORT = int(os.environ.get("PORT", 8000))
 current_tournament_id = None
@@ -80,6 +84,8 @@ main_frame_global = None
 shareable_link = ""
 full_round_robin_schedule = None
 public_ip = ""  # Will store public IP or custom domain
+# Optional global variable for sponsor logos (list of image URLs)
+sponsor_logos = []  # e.g., ["https://example.com/logo1.png", "https://example.com/logo2.png"]
 
 header_html = """<head>
   <meta charset="UTF-8">
@@ -90,6 +96,8 @@ header_html = """<head>
     body { background-color: #f8f9fa; color: #343a40; }
     .container-custom { max-width:800px; margin:auto; }
     footer { margin-top: 40px; font-size: 0.9em; text-align: center; padding: 20px 0; }
+    .sponsor-banner { margin-top: 20px; text-align: center; }
+    .sponsor-banner img { max-height: 50px; margin: 0 10px; }
   </style>
 </head>"""
 
@@ -118,6 +126,9 @@ def get_tournament_folder(tournament_name):
 def finalize_tournament_html(tournament_name, generated_filename):
     folder = get_tournament_folder(tournament_name)
     dest_file = os.path.join(folder, "index.html")
+    # Check if the source and destination are the same
+    if os.path.abspath(generated_filename) == os.path.abspath(dest_file):
+        return dest_file
     shutil.copyfile(generated_filename, dest_file)
     return dest_file
 
@@ -172,7 +183,8 @@ def save_current_tournament():
         },
         "players": [
             {"id": p[0], "name": p[1], "rating": p[2], "wins": p[3], "losses": p[4], "spread": p[5],
-             "last_result": p[6], "scorecard": p[7], "team": p[8]} for p in players
+             "last_result": p[6], "scorecard": p[7], "team": p[8], "player_number": p[9], "country": p[10] if len(p) > 10 else ""}
+            for p in players
         ],
         "progress": {
             "current_round_number": current_round_number,
@@ -209,7 +221,7 @@ def load_tournament():
         teams_list = tournament.get("teams", [])
         team_size = tournament.get("team_size", 0)
         session_players = [(p["name"], p["rating"], p["wins"], p["losses"], p["spread"],
-                             p.get("last_result", ""), p.get("scorecard", ""), p.get("team", "")) for p in players]
+                             p.get("last_result", ""), p.get("scorecard", ""), p.get("team", ""), p.get("player_number", 1), p.get("country", "")) for p in players]
         current_round_number = progress.get("current_round_number", 0)
         completed_rounds = progress.get("completed_rounds", {})
         results_by_round = progress.get("results_by_round", {})
@@ -249,72 +261,6 @@ def quit_app():
 def initialize_database():
     conn = create_connection()
     create_tables(conn)
-    conn.close()
-
-def get_players_for_tournament(tournament_id):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM players WHERE tournament_id = ?", (tournament_id,))
-    players = cursor.fetchall()
-    conn.close()
-    return players
-
-def get_player_id_by_name(tournament_id, name):
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM players WHERE tournament_id = ? AND name = ?", (tournament_id, name))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
-
-def recalc_player_stats():
-    global current_tournament_id
-    players = get_players_for_tournament(current_tournament_id)
-    stats = {}
-    for p in players:
-        stats[p[1]] = {"wins": 0, "losses": 0, "spread": 0, "scorecard": []}
-    for r in sorted(results_by_round.keys()):
-        pairings = completed_rounds.get(r, [])
-        round_results = results_by_round.get(r, [])
-        for i, pairing in enumerate(pairings):
-            if i < len(round_results) and round_results[i] is not None and pairing:
-                score1, score2 = round_results[i]
-                p1, p2, first = pairing
-                if score1 == score2:
-                    stats[p1]["wins"] += 0.5
-                    stats[p2]["wins"] += 0.5
-                    result_p1 = f"Tie ({score1}-{score2}) vs ({p2})"
-                    result_p2 = f"Tie ({score2}-{score1}) vs ({p1})"
-                elif score1 > score2:
-                    stats[p1]["wins"] += 1
-                    diff = score1 - score2
-                    stats[p1]["spread"] += diff
-                    stats[p2]["losses"] += 1
-                    stats[p2]["spread"] -= diff
-                    result_p1 = f"Win ({score1}-{score2}) vs ({p2})"
-                    result_p2 = f"Loss ({score2}-{score1}) vs ({p1})"
-                else:
-                    stats[p2]["wins"] += 1
-                    diff = score2 - score1
-                    stats[p2]["spread"] += diff
-                    stats[p1]["losses"] += 1
-                    stats[p1]["spread"] -= diff
-                    result_p2 = f"Win ({score2}-{score1}) vs ({p1})"
-                    result_p1 = f"Loss ({score1}-{score2}) vs ({p2})"
-                stats[p1]["scorecard"].append({"round": r, "result": result_p1, "cumulative": stats[p1]["spread"]})
-                stats[p2]["scorecard"].append({"round": r, "result": result_p2, "cumulative": stats[p2]["spread"]})
-    conn = create_connection()
-    cursor = conn.cursor()
-    for p in players:
-        name = p[1]
-        new_wins = stats[name]["wins"]
-        new_losses = stats[name]["losses"]
-        new_spread = stats[name]["spread"]
-        new_scorecard = json.dumps(stats[name]["scorecard"])
-        new_last_result = stats[name]["scorecard"][-1]["result"] if stats[name]["scorecard"] else ""
-        cursor.execute("UPDATE players SET wins=?, losses=?, spread=?, last_result=?, scorecard=? WHERE tournament_id=? AND name=?",
-                       (new_wins, new_losses, new_spread, new_last_result, new_scorecard, current_tournament_id, name))
-    conn.commit()
     conn.close()
 
 ##################################
@@ -549,8 +495,9 @@ def generate_player_scorecard_html(player, tournament_id, out_folder):
         {rows if rows else '<tr><td colspan="3">No scorecard data available.</td></tr>'}
       </tbody>
     </table>
-    <a href="./tournament_{tournament_id}_standings.html" class="btn btn-secondary">Back to Standings</a>
+    <a href="./index.html" class="btn btn-secondary">Back to Standings</a>
   </div>
+  {sponsor_footer()}
   <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
@@ -579,12 +526,12 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         schedule = []
     pairing_round_links = []
     base = f"tournament_{tournament_id}"
-    index_file = f"{base}_index.html"
-    roster_file = f"{base}_roster.html"
-    standings_file = f"{base}_standings.html"
-    prize_file = f"{base}_prize.html"
+    index_file = "index.html"  # Home page is always index.html
+    roster_file = f"tournament_{tournament_id}_roster.html"
+    standings_file = f"tournament_{tournament_id}_standings.html"
+    prize_file = f"tournament_{tournament_id}_prize.html"
     for idx, round_pairings in enumerate(schedule, start=1):
-        round_file = f"{base}_pairings_round_{idx}.html"
+        round_file = f"tournament_{tournament_id}_pairings_round_{idx}.html"
         pairing_round_links.append((idx, round_file))
         pairing_content = f"<h2>Round {idx} Pairings</h2>\n<table class='table table-bordered'><thead><tr><th>#</th><th>Pairing</th><th>First</th><th>Match ID</th></tr></thead><tbody>"
         for i, pairing in enumerate(round_pairings, start=1):
@@ -605,7 +552,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         pairing_content += "</tbody></table>"
         navbar_html = f"""<nav class="navbar navbar-expand-lg navbar-light bg-light mb-4">
   <div class="container">
-    <a class="navbar-brand" href="./{index_file}"></a>
+    <a class="navbar-brand" href="./index.html"></a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" 
             data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" 
             aria-label="Toggle navigation">
@@ -613,7 +560,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </button>
     <div class="collapse navbar-collapse" id="navbarNav">
       <ul class="navbar-nav ms-auto">
-        <li class="nav-item"><a class="nav-link" href="./{index_file}">Home</a></li>
+        <li class="nav-item"><a class="nav-link" href="./index.html">Home</a></li>
         <li class="nav-item"><a class="nav-link" href="./{roster_file}">Roster</a></li>
         <li class="nav-item"><a class="nav-link" href="./{standings_file}">Standings</a></li>
         <li class="nav-item"><a class="nav-link" href="./{prize_file}">Prize Table</a></li>
@@ -621,7 +568,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </div>
   </div>
 </nav>"""
-        footer_section = '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
+        footer_section = sponsor_footer() + '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
         pairing_page = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -630,7 +577,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
   <div class="container container-custom">
     <h1 class="mb-3">{tournament_name_db}</h1>
     {pairing_content}
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
+    <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
   {footer_section}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -639,9 +586,12 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
 """
         with open(os.path.join(out_folder, round_file), "w", encoding="utf-8") as f:
             f.write(pairing_page)
+    # Build roster page
     roster_rows = ""
     for idx, p in enumerate(players, start=1):
-        roster_rows += f"<tr><td>{idx}</td><td>{p[1]}</td><td>{p[2]}</td></tr>\n"
+        country = p[10] if len(p) > 10 and p[10] else ""
+        flag = f" <img src='https://flagcdn.com/16x12/{country.lower()}.png' alt='{country}'>" if country else ""
+        roster_rows += f"<tr><td>{idx}</td><td>{p[1]}{flag}</td><td>{p[2]}</td></tr>\n"
     roster_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -654,9 +604,9 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         {roster_rows if roster_rows else '<tr><td colspan="3">No players registered.</td></tr>'}
       </tbody>
     </table>
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
+    <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
+  {sponsor_footer()}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -664,11 +614,14 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     roster_path = os.path.join(out_folder, roster_file)
     with open(roster_path, "w", encoding="utf-8") as f:
         f.write(roster_html)
+    # Build standings page
     sorted_players = sorted(players, key=lambda x: (x[3], x[5]), reverse=True)
     standings_rows = ""
     for rank, player in enumerate(sorted_players, start=1):
+        country = player[10] if len(player) > 10 and player[10] else ""
+        flag = f" <img src='https://flagcdn.com/16x12/{country.lower()}.png' alt='{country}'>" if country else ""
         scorecard_link = generate_player_scorecard_html(player, tournament_id, out_folder)
-        standings_rows += f"<tr><td>{rank}</td><td><a href='./{scorecard_link}'>{player[1]}</a></td><td>{player[3]}</td><td>{player[4]}</td><td>{player[5]}</td><td>{player[6]}</td></tr>\n"
+        standings_rows += f"<tr><td>{rank}</td><td><a href='./{scorecard_link}'>{player[1]}{flag}</a></td><td>{player[3]}</td><td>{player[4]}</td><td>{player[5]}</td><td>{player[6]}</td></tr>\n"
     standings_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -683,9 +636,9 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         {standings_rows if standings_rows else '<tr><td colspan="6">No standings available.</td></tr>'}
       </tbody>
     </table>
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
+    <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
+  {sponsor_footer()}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -693,6 +646,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     standings_path = os.path.join(out_folder, standings_file)
     with open(standings_path, "w", encoding="utf-8") as f:
         f.write(standings_html)
+    # Build prize table page
     prize_rows = ""
     for prize in prize_table:
         if prize["prize_type"] == "Monetary":
@@ -711,9 +665,9 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
         {prize_rows if prize_rows else '<tr><td colspan="2">No prizes set.</td></tr>'}
       </tbody>
     </table>
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
+    <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
+  {sponsor_footer()}
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -721,12 +675,13 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     prize_path = os.path.join(out_folder, prize_file)
     with open(prize_path, "w", encoding="utf-8") as f:
         f.write(prize_html)
+    # Build main index page
     round_links_html = ""
     for r, link in pairing_round_links:
         round_links_html += f"<li class='list-group-item'><a href='./{link}'>Round {r} Pairings</a></li>\n"
     navbar_html = f"""<nav class="navbar navbar-expand-lg navbar-light bg-light mb-4">
   <div class="container">
-    <a class="navbar-brand" href="./{index_file}"></a>
+    <a class="navbar-brand" href="./index.html"></a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" 
             data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" 
             aria-label="Toggle navigation">
@@ -734,7 +689,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </button>
     <div class="collapse navbar-collapse" id="navbarNav">
       <ul class="navbar-nav ms-auto">
-        <li class="nav-item"><a class="nav-link" href="./{index_file}">Home</a></li>
+        <li class="nav-item"><a class="nav-link" href="./index.html">Home</a></li>
         <li class="nav-item"><a class="nav-link" href="./{roster_file}">Roster</a></li>
         <li class="nav-item"><a class="nav-link" href="./{standings_file}">Standings</a></li>
         <li class="nav-item"><a class="nav-link" href="./{prize_file}">Prize Table</a></li>
@@ -742,7 +697,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </div>
   </div>
 </nav>"""
-    footer_section = '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
+    footer_section = sponsor_footer() + '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
     folder_name = re.sub(r'[\\/*?:"<>|]', "", tournament_name).replace(" ", "_")
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
         shareable = f"{public_ip}/tournament/{folder_name}"
@@ -777,6 +732,14 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     with open(index_path, "w", encoding="utf-8") as f:
         f.write(index_html)
     return index_path
+
+# Helper function to generate sponsor footer if sponsor_logos is provided
+def sponsor_footer():
+    if sponsor_logos:
+        imgs = "".join([f"<img src='{url}' alt='Sponsor'>" for url in sponsor_logos])
+        return f"<div class='sponsor-banner'>{imgs}</div>"
+    else:
+        return ""
 
 ##################################
 # Flask Application for Coverage & Remote Results
@@ -1007,7 +970,7 @@ def setup_prize_table(tab_frame):
     def add_prize():
         name = prize_name_entry.get().strip()
         ptype = prize_type_var.get()
-        if not name:
+        if name == "":
             messagebox.showerror("Error", "Prize name is required.")
             return
         if ptype == "Monetary":
@@ -1078,13 +1041,16 @@ def open_event_index():
         tname, tdate = result
     else:
         tname, tdate = "Tournament", ""
-    folder_name = re.sub(r'[\\/*?:"<>|]', "", tname).replace(" ", "_")
+    generated_index = generate_tournament_html(current_tournament_id, tname, tdate)
+    final_index = finalize_tournament_html(tname, generated_index)
+    rendered_dir = os.path.join(os.getcwd(), "rendered")
+    relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
     if not public_ip:
         public_ip = "direktorexe.onrender.com"
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
-        url = f"{public_ip}/tournament/{folder_name}"
+        url = f"{public_ip}/{relative_path}"
     else:
-        url = f"http://{public_ip}:{HTTP_PORT}/tournament/{folder_name}"
+        url = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
     webbrowser.open(url)
 
 ##################################
@@ -1298,7 +1264,7 @@ def setup_tournament_setup(tab_frame):
     create_button.pack(pady=10)
 
 ##################################
-# UI Functions: Player Registration Tab
+# UI Functions: Player Registration Tab (with Country Field and Player Number Reset)
 ##################################
 def setup_player_registration(tab_frame):
     global current_tournament_id, session_players, tournament_mode, teams_list
@@ -1309,6 +1275,8 @@ def setup_player_registration(tab_frame):
     rating_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter rating (or 000 if unrated)")
     rating_entry.pack(pady=5)
     rating_entry.insert(0, "000")
+    country_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter country (optional)")
+    country_entry.pack(pady=5)
     if tournament_mode == "Team Round Robin":
         team_var = ctk.StringVar()
         team_dropdown = ctk.CTkOptionMenu(tab_frame, variable=team_var, values=teams_list if teams_list else ["No Teams Defined"])
@@ -1326,7 +1294,11 @@ def setup_player_registration(tab_frame):
         player_list_text.insert("end", "Registered Players (This Tournament):\n")
         for player in players:
             team = player[8] if len(player) > 8 and player[8] else ""
-            display_name = f"{player[1]}, ({team})" if team else player[1]
+            country = player[10] if len(player) > 10 and player[10] else ""
+            flag = f" <img src='https://flagcdn.com/16x12/{country.lower()}.png' alt='{country}'>" if country else ""
+            display_name = f"{player[1]} (#{player[9]}){flag}"
+            if team:
+                display_name += f", {team}"
             player_list_text.insert("end", f"{display_name} (Rating: {player[2]})\n")
         player_list_text.configure(state="disabled")
     def register_player():
@@ -1336,6 +1308,7 @@ def setup_player_registration(tab_frame):
             return
         name = name_entry.get().strip()
         rating_str = rating_entry.get().strip()
+        country = country_entry.get().strip()
         try:
             rating = int(rating_str) if rating_str and rating_str.isdigit() else 0
         except ValueError:
@@ -1349,16 +1322,17 @@ def setup_player_registration(tab_frame):
             if team in ("No Teams Defined", ""):
                 show_toast(tab_frame, "Please select a team.")
                 return
-        # Reset player numbering for each tournament: new player's number is count+1
-        next_player_number = len(get_players_for_tournament(current_tournament_id)) + 1
+        players = get_players_for_tournament(current_tournament_id)
+        next_player_number = len(players) + 1
         conn = create_connection()
-        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team, next_player_number)
+        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team, next_player_number, country)
         conn.close()
         show_toast(tab_frame, f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
         print(f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
         name_entry.delete(0, 'end')
         rating_entry.delete(0, 'end')
         rating_entry.insert(0, "000")
+        country_entry.delete(0, 'end')
         update_player_list()
     register_button = ctk.CTkButton(tab_frame, text="Register Player", command=register_player)
     register_button.pack(pady=10)
@@ -1432,260 +1406,91 @@ def setup_pairings(tab_frame):
     update_round_options()
 
 ##################################
-# HTML Generation Functions
+# UI Functions: Build Tab View
 ##################################
-def generate_player_scorecard_html(player, tournament_id, out_folder):
-    player_id = player[0]
-    try:
-        scorecard = json.loads(player[7]) if player[7] else []
-    except Exception:
-        scorecard = []
-    rows = ""
-    for entry in scorecard:
-        rows += f"<tr><td>{entry.get('round', 'N/A')}</td><td>{entry.get('result', 'N/A')}</td><td>{entry.get('cumulative', 'N/A')}</td></tr>\n"
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-{header_html}
-<body>
-  <div class="container container-custom">
-    <h1 class="mt-4">Scorecard</h1>
-    <h3>{player[1]} (Rating: {player[2]})</h3>
-    <table class="table table-striped">
-      <thead>
-        <tr><th>Round</th><th>Result</th><th>Cumulative Spread</th></tr>
-      </thead>
-      <tbody>
-        {rows if rows else '<tr><td colspan="3">No scorecard data available.</td></tr>'}
-      </tbody>
-    </table>
-    <a href="./tournament_{tournament_id}_standings.html" class="btn btn-secondary">Back to Standings</a>
-  </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-"""
-    out_path = os.path.join(out_folder, f"tournament_{tournament_id}_player_{player_id}.html")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    return f"tournament_{tournament_id}_player_{player_id}.html"
-
-def generate_tournament_html(tournament_id, tournament_name, tournament_date):
-    out_folder = get_tournament_folder(tournament_name)
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, date, venue FROM tournaments WHERE id = ?", (tournament_id,))
-    result = cursor.fetchone()
-    conn.close()
-    if result:
-        tournament_name_db, tournament_date_db, tournament_venue = result
-    else:
-        tournament_name_db, tournament_date_db, tournament_venue = tournament_name, tournament_date, ""
-    players = get_players_for_tournament(tournament_id)
-    if completed_rounds:
-        schedule = [completed_rounds[r] for r in sorted(completed_rounds.keys())]
-    else:
-        schedule = []
-    pairing_round_links = []
-    base = f"tournament_{tournament_id}"
-    index_file = f"{base}_index.html"
-    roster_file = f"{base}_roster.html"
-    standings_file = f"{base}_standings.html"
-    prize_file = f"{base}_prize.html"
-    for idx, round_pairings in enumerate(schedule, start=1):
-        round_file = f"{base}_pairings_round_{idx}.html"
-        pairing_round_links.append((idx, round_file))
-        pairing_content = f"<h2>Round {idx} Pairings</h2>\n<table class='table table-bordered'><thead><tr><th>#</th><th>Pairing</th><th>First</th><th>Match ID</th></tr></thead><tbody>"
-        for i, pairing in enumerate(round_pairings, start=1):
-            match_id = f"R{idx}-M{i}"
-            if tournament_mode == "Team Round Robin":
-                pairing_str = "Team pairings not implemented."
-                first = "N/A"
-            else:
-                if len(pairing) == 3:
-                    p1, p2, first = pairing
-                elif len(pairing) == 2:
-                    p1, p2 = pairing
-                    first = random.choice([p1, p2])
-                else:
-                    p1, p2, first = "???", "???", "???"
-                pairing_str = f"{p1} vs {p2}"
-            pairing_content += f"<tr><td>{i}</td><td>{pairing_str}</td><td>{first}</td><td>{match_id} <button onclick='navigator.clipboard.writeText(\"{match_id}\")'>Copy</button></td></tr>"
-        pairing_content += "</tbody></table>"
-        navbar_html = f"""<nav class="navbar navbar-expand-lg navbar-light bg-light mb-4">
-  <div class="container">
-    <a class="navbar-brand" href="./{index_file}"></a>
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" 
-            data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" 
-            aria-label="Toggle navigation">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-    <div class="collapse navbar-collapse" id="navbarNav">
-      <ul class="navbar-nav ms-auto">
-        <li class="nav-item"><a class="nav-link" href="./{index_file}">Home</a></li>
-        <li class="nav-item"><a class="nav-link" href="./{roster_file}">Roster</a></li>
-        <li class="nav-item"><a class="nav-link" href="./{standings_file}">Standings</a></li>
-        <li class="nav-item"><a class="nav-link" href="./{prize_file}">Prize Table</a></li>
-      </ul>
-    </div>
-  </div>
-</nav>"""
-        footer_section = '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
-        pairing_page = f"""<!DOCTYPE html>
-<html lang="en">
-{header_html}
-<body>
-  {navbar_html}
-  <div class="container container-custom">
-    <h1 class="mb-3">{tournament_name_db}</h1>
-    {pairing_content}
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
-  </div>
-  {footer_section}
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-"""
-        with open(os.path.join(out_folder, round_file), "w", encoding="utf-8") as f:
-            f.write(pairing_page)
-    roster_rows = ""
-    for idx, p in enumerate(players, start=1):
-        roster_rows += f"<tr><td>{idx}</td><td>{p[1]}</td><td>{p[2]}</td></tr>\n"
-    roster_html = f"""<!DOCTYPE html>
-<html lang="en">
-{header_html}
-<body>
-  <div class="container container-custom">
-    <h1 class="mt-4">Player Roster - {tournament_name_db}</h1>
-    <table class="table table-striped">
-      <thead><tr><th>#</th><th>Name</th><th>Rating</th></tr></thead>
-      <tbody>
-        {roster_rows if roster_rows else '<tr><td colspan="3">No players registered.</td></tr>'}
-      </tbody>
-    </table>
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
-  </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-"""
-    roster_path = os.path.join(out_folder, roster_file)
-    with open(roster_path, "w", encoding="utf-8") as f:
-        f.write(roster_html)
-    sorted_players = sorted(players, key=lambda x: (x[3], x[5]), reverse=True)
-    standings_rows = ""
-    for rank, player in enumerate(sorted_players, start=1):
-        scorecard_link = generate_player_scorecard_html(player, tournament_id, out_folder)
-        standings_rows += f"<tr><td>{rank}</td><td><a href='./{scorecard_link}'>{player[1]}</a></td><td>{player[3]}</td><td>{player[4]}</td><td>{player[5]}</td><td>{player[6]}</td></tr>\n"
-    standings_html = f"""<!DOCTYPE html>
-<html lang="en">
-{header_html}
-<body>
-  <div class="container container-custom">
-    <h1 class="mt-4">Standings - {tournament_name_db}</h1>
-    <table class="table table-hover">
-      <thead>
-        <tr><th>Rank</th><th>Name</th><th>Wins</th><th>Losses</th><th>Spread</th><th>Last Result</th></tr>
-      </thead>
-      <tbody>
-        {standings_rows if standings_rows else '<tr><td colspan="6">No standings available.</td></tr>'}
-      </tbody>
-    </table>
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
-  </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-"""
-    standings_path = os.path.join(out_folder, standings_file)
-    with open(standings_path, "w", encoding="utf-8") as f:
-        f.write(standings_html)
-    prize_rows = ""
-    for prize in prize_table:
-        if prize["prize_type"] == "Monetary":
-            prize_rows += f"<tr><td>{prize['prize_name']}</td><td>{prize['currency']} {prize['amount']}</td></tr>\n"
+def setup_tab_content(tab_name, tab_frame):
+    if tab_name == "Tournament Setup":
+        setup_tournament_setup(tab_frame)
+    elif tab_name == "Player Registration":
+        setup_player_registration(tab_frame)
+    elif tab_name in ("Pairings", "Team Pairings"):
+        setup_pairings(tab_frame)
+    elif tab_name == "Enter Results":
+        setup_enter_results(tab_frame)
+    elif tab_name == "Prize Table":
+        setup_prize_table(tab_frame)
+    elif tab_name in ("Reports & Exports", "Render"):
+        if tab_name == "Reports & Exports":
+            setup_reports(tab_frame)
         else:
-            prize_rows += f"<tr><td>{prize['prize_name']}</td><td>{prize['prize_description']}</td></tr>\n"
-    prize_html = f"""<!DOCTYPE html>
-<html lang="en">
-{header_html}
-<body>
-  <div class="container container-custom">
-    <h1 class="mt-4">Prize Table - {tournament_name_db}</h1>
-    <table class="table table-bordered">
-      <thead><tr><th>Prize Name</th><th>Details</th></tr></thead>
-      <tbody>
-        {prize_rows if prize_rows else '<tr><td colspan="2">No prizes set.</td></tr>'}
-      </tbody>
-    </table>
-    <a href="./{index_file}" class="btn btn-secondary">Back to Index</a>
-  </div>
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-"""
-    prize_path = os.path.join(out_folder, prize_file)
-    with open(prize_path, "w", encoding="utf-8") as f:
-        f.write(prize_html)
-    round_links_html = ""
-    for r, link in pairing_round_links:
-        round_links_html += f"<li class='list-group-item'><a href='./{link}'>Round {r} Pairings</a></li>\n"
-    navbar_html = f"""<nav class="navbar navbar-expand-lg navbar-light bg-light mb-4">
-  <div class="container">
-    <a class="navbar-brand" href="./{index_file}"></a>
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" 
-            data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" 
-            aria-label="Toggle navigation">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-    <div class="collapse navbar-collapse" id="navbarNav">
-      <ul class="navbar-nav ms-auto">
-        <li class="nav-item"><a class="nav-link" href="./{index_file}">Home</a></li>
-        <li class="nav-item"><a class="nav-link" href="./{roster_file}">Roster</a></li>
-        <li class="nav-item"><a class="nav-link" href="./{standings_file}">Standings</a></li>
-        <li class="nav-item"><a class="nav-link" href="./{prize_file}">Prize Table</a></li>
-      </ul>
-    </div>
-  </div>
-</nav>"""
-    footer_section = '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
-    folder_name = re.sub(r'[\\/*?:"<>|]', "", tournament_name).replace(" ", "_")
-    if public_ip.startswith("http://") or public_ip.startswith("https://"):
-        shareable = f"{public_ip}/tournament/{folder_name}"
+            setup_render(tab_frame)
+    elif tab_name == "FTP Settings":
+        setup_ftp_settings(tab_frame)
     else:
-        shareable = f"http://{public_ip}:{HTTP_PORT}/tournament/{folder_name}"
-    index_html = f"""<!DOCTYPE html>
-<html lang="en">
-{header_html}
-<body>
-  {navbar_html}
-  <div class="container container-custom">
-    <h1 class="mb-3">{tournament_name_db}</h1>
-    <p class="lead">{tournament_date_db} | {tournament_venue}</p>
-    <h2 class="mt-4">Event Coverage Index</h2>
-    <ul class="list-group">
-      <li class="list-group-item"><a href="./{roster_file}">Player Roster</a></li>
-      {round_links_html}
-      <li class="list-group-item"><a href="./{standings_file}">Standings</a></li>
-      <li class="list-group-item"><a href="./{prize_file}">Prize Table</a></li>
-    </ul>
-    <br>
-    <a href="/submit_results" class="btn btn-primary">Submit Results</a>
-    <br><br>
-    <p>Shareable URL: <a href="{shareable}">{shareable}</a></p>
-  </div>
-  {footer_section}
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-"""
-    index_path = os.path.join(out_folder, index_file)
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write(index_html)
-    return index_path
+        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
+        label.pack(pady=20)
+    def save_tab():
+        show_toast(tab_frame, "Tab data saved.")
+    tab_save_button = ctk.CTkButton(tab_frame, text="Save Tab", command=save_tab)
+    tab_save_button.pack(pady=5)
+
+def setup_tab_content_without_save(tab_frame, tab_name):
+    if tab_name in ("Reports & Exports", "Render", "FTP Settings"):
+        if tab_name == "Reports & Exports":
+            setup_reports(tab_frame)
+        elif tab_name == "Render":
+            setup_render(tab_frame)
+        else:
+            setup_ftp_settings(tab_frame)
+    else:
+        label = ctk.CTkLabel(tab_frame, text=tab_name, font=("Arial", 18))
+        label.pack(pady=20)
+
+def build_tab_view(parent):
+    if current_mode_view == "general":
+        tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render", "FTP Settings"]
+    elif current_mode_view == "team":
+        tabs = ["Tournament Setup", "Player Registration", "Team Pairings", "Team Results", "Prize Table", "Render", "FTP Settings"]
+    else:
+        tabs = []
+    tab_view = ctk.CTkTabview(parent, width=880, height=700)
+    tab_view.pack(fill="both", expand=True)
+    for tab in tabs:
+        tab_view.add(tab)
+        if current_mode_view in ("general", "team") and tab in ("Pairings", "Team Pairings"):
+            setup_pairings(tab_view.tab(tab))
+        elif tab in ("Reports & Exports", "Render", "FTP Settings"):
+            def setup_without_save(frame, tname=tab):
+                if tname == "Reports & Exports":
+                    setup_reports(frame)
+                elif tname == "Render":
+                    setup_render(frame)
+                elif tname == "FTP Settings":
+                    setup_ftp_settings(frame)
+                else:
+                    label = ctk.CTkLabel(frame, text=tname, font=("Arial", 18))
+                    label.pack(pady=20)
+            setup_without_save(tab_view.tab(tab))
+        else:
+            setup_tab_content(tab, tab_view.tab(tab))
+    return tab_view
+
+def rebuild_tab_view():
+    global main_frame_global
+    for widget in main_frame_global.winfo_children():
+        widget.destroy()
+    return build_tab_view(main_frame_global)
+
+def switch_mode_toggle():
+    global current_mode_view, tournament_mode
+    if current_mode_view == "general":
+        current_mode_view = "team"
+        tournament_mode = "Team Round Robin"
+    else:
+        current_mode_view = "general"
+        tournament_mode = "General"
+    rebuild_tab_view()
+    show_toast(app, f"Switched to {current_mode_view.capitalize()} Mode.")
 
 ##################################
 # Flask Application for Coverage & Remote Results
@@ -1896,7 +1701,6 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
     
-    # Build the main tab view
     def build_tab_view(parent):
         if current_mode_view == "general":
             tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render", "FTP Settings"]

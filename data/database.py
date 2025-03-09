@@ -1,113 +1,98 @@
 import sqlite3
 
 def create_connection(db_file="direktor.db"):
-    """Create a database connection to the SQLite database specified by db_file."""
-    conn = None
-    try:
-        conn = sqlite3.connect(db_file)
-    except sqlite3.Error as e:
-        print("Error connecting to database:", e)
+    """Create and return a connection to the SQLite database."""
+    conn = sqlite3.connect(db_file)
     return conn
 
 def create_tables(conn):
-    """Create tables in the database if they do not exist."""
-    try:
-        cursor = conn.cursor()
-        # Create the tournaments table with a shareable_link column.
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tournaments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                date TEXT,
-                venue TEXT,
-                shareable_link TEXT
-            )
-        """)
-        # Create the players table with a player_number column.
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS players (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                rating INTEGER,
-                wins REAL DEFAULT 0,
-                losses REAL DEFAULT 0,
-                spread INTEGER DEFAULT 0,
-                last_result TEXT,
-                scorecard TEXT,
-                team TEXT,
-                tournament_id INTEGER,
-                player_number INTEGER,
-                FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
-            )
-        """)
-        # Create a results table (for remote submissions)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                match_id TEXT UNIQUE,
-                player1_score INTEGER,
-                player2_score INTEGER
-            )
-        """)
-        conn.commit()
-    except sqlite3.Error as e:
-        print("Error creating tables:", e)
+    """Create the required tables if they do not already exist."""
+    cursor = conn.cursor()
+    # Create the tournaments table with a shareable_link column.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tournaments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            shareable_link TEXT
+        );
+    """)
+    # Create the players table with tournament_id, player_number, and country columns.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            rating INTEGER,
+            wins REAL DEFAULT 0,
+            losses REAL DEFAULT 0,
+            spread INTEGER DEFAULT 0,
+            last_result TEXT,
+            scorecard TEXT,
+            team TEXT,
+            player_number INTEGER,
+            country TEXT,
+            tournament_id INTEGER,
+            FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
+        );
+    """)
+    # Create a results table for remote result submissions.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS results (
+            match_id TEXT PRIMARY KEY,
+            player1_score INTEGER,
+            player2_score INTEGER
+        );
+    """)
+    conn.commit()
 
 def insert_tournament(conn, name, date, venue):
-    """Insert a new tournament into the tournaments table."""
-    try:
-        sql = "INSERT INTO tournaments (name, date, venue) VALUES (?, ?, ?)"
-        cur = conn.cursor()
-        cur.execute(sql, (name, date, venue))
-        conn.commit()
-        return cur.lastrowid
-    except sqlite3.Error as e:
-        print("Error inserting tournament:", e)
-        return None
+    """Insert a new tournament and return its database-generated ID."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO tournaments (name, date, venue)
+        VALUES (?, ?, ?)
+    """, (name, date, venue))
+    conn.commit()
+    return cursor.lastrowid
 
-def insert_player(conn, name, rating, tournament_id, team, player_number):
+def insert_player(conn, name, rating, tournament_id, team, player_number, country):
     """
-    Insert a new player into the players table.
-    The player_number parameter ensures that player numbering resets for each tournament.
+    Insert a new player with the given data.
+    player_number should be the sequential number for this tournament.
     """
-    try:
-        sql = """INSERT INTO players (name, rating, tournament_id, team, player_number)
-                 VALUES (?, ?, ?, ?, ?)"""
-        cur = conn.cursor()
-        cur.execute(sql, (name, rating, tournament_id, team, player_number))
-        conn.commit()
-        return cur.lastrowid
-    except sqlite3.Error as e:
-        print("Error inserting player:", e)
-        return None
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO players (name, rating, tournament_id, team, player_number, country)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (name, rating, tournament_id, team, player_number, country))
+    conn.commit()
+    return cursor.lastrowid
 
 def get_all_tournaments(conn):
-    """Return all tournaments from the tournaments table."""
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM tournaments")
-    return cur.fetchall()
+    """Return all tournaments in the database."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM tournaments")
+    return cursor.fetchall()
 
 def get_all_players(conn):
-    """Return all players from the players table."""
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM players")
-    return cur.fetchall()
+    """Return all players in the database."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM players")
+    return cursor.fetchall()
 
 def get_players_for_tournament(tournament_id):
-    """Return all players for a given tournament_id."""
+    """Return all players registered for a given tournament."""
     conn = create_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM players WHERE tournament_id = ?", (tournament_id,))
-    players = cur.fetchall()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM players WHERE tournament_id = ?", (tournament_id,))
+    players = cursor.fetchall()
     conn.close()
     return players
 
+# If this file is run as a script, create the database and tables.
 if __name__ == "__main__":
-    # For testing purposes, create a connection and initialize tables.
     conn = create_connection()
-    if conn is not None:
-        create_tables(conn)
-        print("Tables created/updated successfully")
-        conn.close()
-    else:
-        print("Error! Cannot create the database connection.")
+    create_tables(conn)
+    conn.close()
+    print("Database and tables created successfully.")
