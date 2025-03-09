@@ -1046,7 +1046,7 @@ def open_event_index():
     rendered_dir = os.path.join(os.getcwd(), "rendered")
     relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
     if not public_ip:
-        public_ip = "direktorexe.onrender.com"
+    public_ip = "https://direktorexe.onrender.com"
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
         url = f"{public_ip}/{relative_path}"
     else:
@@ -1513,7 +1513,7 @@ def flask_index():
     else:
         abort(404, "No tournament coverage found.")
 
-@flask_app.route("/tournament/<tournament_name>")
+@flask_app.route("/tournaments/<tournament_name>")
 def flask_tournament_index(tournament_name):
     folder = os.path.join("rendered", "tournaments", tournament_name)
     if os.path.exists(os.path.join(folder, "index.html")):
@@ -1521,13 +1521,17 @@ def flask_tournament_index(tournament_name):
     else:
         abort(404, f"Tournament '{tournament_name}' not found.")
 
-@flask_app.route("/tournament/<tournament_name>/<path:filename>")
-def flask_tournament_files(tournament_name, filename):
+@flask_app.route("/tournaments/<path:subpath>")
+def flask_tournament_static(subpath):
+    parts = subpath.split("/", 1)
+    tournament_name = parts[0]
+    filename = parts[1] if len(parts) > 1 else "index.html"
     folder = os.path.join("rendered", "tournaments", tournament_name)
     if os.path.exists(os.path.join(folder, filename)):
         return send_from_directory(folder, filename)
     else:
         abort(404, f"File '{filename}' not found in tournament '{tournament_name}'.")
+
 
 @flask_app.route("/submit_results", methods=["GET", "POST"])
 def flask_submit_results():
