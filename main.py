@@ -21,9 +21,9 @@ Features:
        – “Save Tournament” saves the complete tournament progress as a .TOU file.
        – “Load Tournament” lets the user resume a saved tournament.
        – “Quit App” exits the application.
-  • **New:** When a new tournament is created, player numbering resets (the first player added gets player_number 1 for that tournament).
-  • **New:** In player registration, an optional “Country” field is provided. When set, the player’s country (or flag) is shown next to their name in all HTML outputs.
-  • **New:** An optional footer banner is added to every generated HTML page to display sponsor logos (if the global variable sponsor_logos is set).
+  • New: When a new tournament is created, player numbering resets (the first player added gets player_number 1 for that tournament).
+  • New: A sponsor footer banner is optionally shown at the bottom of all pages if sponsor logos HTML is provided.
+  • New: Optional country field when registering players; if set, flag images will appear alongside player names.
   • Overall UX enhancements include improved layout, clear feedback messages, tooltips, and robust error handling.
 
 Author: Manuelito
@@ -40,7 +40,6 @@ import tkinter.simpledialog as simpledialog
 from functools import partial
 from data.database import create_connection, create_tables, insert_player, insert_tournament, get_all_tournaments, get_all_players, get_players_for_tournament
 
-# Global list of currency codes for prize setup
 all_currencies = [
     "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
     "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL",
@@ -61,7 +60,6 @@ all_currencies = [
     "ZMW", "ZWL"
 ]
 
-# Global variables for state management
 server_thread = None
 HTTP_PORT = int(os.environ.get("PORT", 8000))
 current_tournament_id = None
@@ -84,20 +82,20 @@ main_frame_global = None
 shareable_link = ""
 full_round_robin_schedule = None
 public_ip = ""  # Will store public IP or custom domain
-# Optional global variable for sponsor logos (list of image URLs)
-sponsor_logos = []  # e.g., ["https://example.com/logo1.png", "https://example.com/logo2.png"]
+sponsor_logos = ""  # Optional sponsor logos HTML
 
+# Updated header_html with a <base> tag (set the base to "/" by default; you can adjust as needed)
 header_html = """<head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tournament</title>
+  <base href="/">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     body { background-color: #f8f9fa; color: #343a40; }
     .container-custom { max-width:800px; margin:auto; }
     footer { margin-top: 40px; font-size: 0.9em; text-align: center; padding: 20px 0; }
     .sponsor-banner { margin-top: 20px; text-align: center; }
-    .sponsor-banner img { max-height: 50px; margin: 0 10px; }
   </style>
 </head>"""
 
@@ -126,8 +124,8 @@ def get_tournament_folder(tournament_name):
 def finalize_tournament_html(tournament_name, generated_filename):
     folder = get_tournament_folder(tournament_name)
     dest_file = os.path.join(folder, "index.html")
-    # Check if the source and destination are the same
     if os.path.abspath(generated_filename) == os.path.abspath(dest_file):
+        # Avoid copying file onto itself.
         return dest_file
     shutil.copyfile(generated_filename, dest_file)
     return dest_file
@@ -183,8 +181,7 @@ def save_current_tournament():
         },
         "players": [
             {"id": p[0], "name": p[1], "rating": p[2], "wins": p[3], "losses": p[4], "spread": p[5],
-             "last_result": p[6], "scorecard": p[7], "team": p[8], "player_number": p[9], "country": p[10] if len(p) > 10 else ""}
-            for p in players
+             "last_result": p[6], "scorecard": p[7], "team": p[8], "player_number": p[9]} for p in players
         ],
         "progress": {
             "current_round_number": current_round_number,
@@ -221,7 +218,7 @@ def load_tournament():
         teams_list = tournament.get("teams", [])
         team_size = tournament.get("team_size", 0)
         session_players = [(p["name"], p["rating"], p["wins"], p["losses"], p["spread"],
-                             p.get("last_result", ""), p.get("scorecard", ""), p.get("team", ""), p.get("player_number", 1), p.get("country", "")) for p in players]
+                             p.get("last_result", ""), p.get("scorecard", ""), p.get("team", ""), p.get("player_number", 1)) for p in players]
         current_round_number = progress.get("current_round_number", 0)
         completed_rounds = progress.get("completed_rounds", {})
         results_by_round = progress.get("results_by_round", {})
@@ -261,6 +258,72 @@ def quit_app():
 def initialize_database():
     conn = create_connection()
     create_tables(conn)
+    conn.close()
+
+def get_players_for_tournament(tournament_id):
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM players WHERE tournament_id = ?", (tournament_id,))
+    players = cursor.fetchall()
+    conn.close()
+    return players
+
+def get_player_id_by_name(tournament_id, name):
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM players WHERE tournament_id = ? AND name = ?", (tournament_id, name))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def recalc_player_stats():
+    global current_tournament_id
+    players = get_players_for_tournament(current_tournament_id)
+    stats = {}
+    for p in players:
+        stats[p[1]] = {"wins": 0, "losses": 0, "spread": 0, "scorecard": []}
+    for r in sorted(results_by_round.keys()):
+        pairings = completed_rounds.get(r, [])
+        round_results = results_by_round.get(r, [])
+        for i, pairing in enumerate(pairings):
+            if i < len(round_results) and round_results[i] is not None and pairing:
+                score1, score2 = round_results[i]
+                p1, p2, first = pairing
+                if score1 == score2:
+                    stats[p1]["wins"] += 0.5
+                    stats[p2]["wins"] += 0.5
+                    result_p1 = f"Tie ({score1}-{score2}) vs ({p2})"
+                    result_p2 = f"Tie ({score2}-{score1}) vs ({p1})"
+                elif score1 > score2:
+                    stats[p1]["wins"] += 1
+                    diff = score1 - score2
+                    stats[p1]["spread"] += diff
+                    stats[p2]["losses"] += 1
+                    stats[p2]["spread"] -= diff
+                    result_p1 = f"Win ({score1}-{score2}) vs ({p2})"
+                    result_p2 = f"Loss ({score2}-{score1}) vs ({p1})"
+                else:
+                    stats[p2]["wins"] += 1
+                    diff = score2 - score1
+                    stats[p2]["spread"] += diff
+                    stats[p1]["losses"] += 1
+                    stats[p1]["spread"] -= diff
+                    result_p2 = f"Win ({score2}-{score1}) vs ({p1})"
+                    result_p1 = f"Loss ({score1}-{score2}) vs ({p2})"
+                stats[p1]["scorecard"].append({"round": r, "result": result_p1, "cumulative": stats[p1]["spread"]})
+                stats[p2]["scorecard"].append({"round": r, "result": result_p2, "cumulative": stats[p2]["spread"]})
+    conn = create_connection()
+    cursor = conn.cursor()
+    for p in players:
+        name = p[1]
+        new_wins = stats[name]["wins"]
+        new_losses = stats[name]["losses"]
+        new_spread = stats[name]["spread"]
+        new_scorecard = json.dumps(stats[name]["scorecard"])
+        new_last_result = stats[name]["scorecard"][-1]["result"] if stats[name]["scorecard"] else ""
+        cursor.execute("UPDATE players SET wins=?, losses=?, spread=?, last_result=?, scorecard=? WHERE tournament_id=? AND name=?",
+                       (new_wins, new_losses, new_spread, new_last_result, new_scorecard, current_tournament_id, name))
+    conn.commit()
     conn.close()
 
 ##################################
@@ -497,8 +560,10 @@ def generate_player_scorecard_html(player, tournament_id, out_folder):
     </table>
     <a href="./index.html" class="btn btn-secondary">Back to Standings</a>
   </div>
-  {sponsor_footer()}
-  <footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>
+  <footer class="bg-light">
+    <div class="sponsor-banner">{sponsor_logos}</div>
+    Direktor Scrabble Tournament Manager by Manuelito
+  </footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -510,26 +575,6 @@ def generate_player_scorecard_html(player, tournament_id, out_folder):
 
 def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     out_folder = get_tournament_folder(tournament_name)
-    # Derive the folder name from the out_folder path:
-    folder_name = os.path.basename(out_folder)
-    # Build the base href using your Render domain:
-    base_href = f"https://direktorexe.onrender.com/tournaments/{folder_name}/"
-    # Create a new header that includes the <base> tag:
-    header = f"""<head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>Tournament</title>
-      <base href="{base_href}">
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-      <style>
-        body {{ background-color: #f8f9fa; color: #343a40; }}
-        .container-custom {{ max-width:800px; margin:auto; }}
-        footer {{ margin-top: 40px; font-size: 0.9em; text-align: center; padding: 20px 0; }}
-      </style>
-    </head>"""
-    # Continue with the rest of your function here, using 'header' instead of a global header_html
-    # For example, use header when constructing the HTML output:
-    # (rest of function code follows here)
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT name, date, venue FROM tournaments WHERE id = ?", (tournament_id,))
@@ -588,7 +633,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </div>
   </div>
 </nav>"""
-        footer_section = sponsor_footer() + '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
+        footer_section = f'<footer class="bg-light"><div class="sponsor-banner">{sponsor_logos}</div>Direktor Scrabble Tournament Manager by Manuelito</footer>'
         pairing_page = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -606,12 +651,9 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
 """
         with open(os.path.join(out_folder, round_file), "w", encoding="utf-8") as f:
             f.write(pairing_page)
-    # Build roster page
     roster_rows = ""
     for idx, p in enumerate(players, start=1):
-        country = p[10] if len(p) > 10 and p[10] else ""
-        flag = f" <img src='https://flagcdn.com/16x12/{country.lower()}.png' alt='{country}'>" if country else ""
-        roster_rows += f"<tr><td>{idx}</td><td>{p[1]}{flag}</td><td>{p[2]}</td></tr>\n"
+        roster_rows += f"<tr><td>{idx}</td><td>{p[1]}</td><td>{p[2]}</td></tr>\n"
     roster_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -626,7 +668,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </table>
     <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
-  {sponsor_footer()}
+  <footer class="bg-light"><div class="sponsor-banner">{sponsor_logos}</div>Direktor Scrabble Tournament Manager by Manuelito</footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -634,14 +676,11 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     roster_path = os.path.join(out_folder, roster_file)
     with open(roster_path, "w", encoding="utf-8") as f:
         f.write(roster_html)
-    # Build standings page
     sorted_players = sorted(players, key=lambda x: (x[3], x[5]), reverse=True)
     standings_rows = ""
     for rank, player in enumerate(sorted_players, start=1):
-        country = player[10] if len(player) > 10 and player[10] else ""
-        flag = f" <img src='https://flagcdn.com/16x12/{country.lower()}.png' alt='{country}'>" if country else ""
         scorecard_link = generate_player_scorecard_html(player, tournament_id, out_folder)
-        standings_rows += f"<tr><td>{rank}</td><td><a href='./{scorecard_link}'>{player[1]}{flag}</a></td><td>{player[3]}</td><td>{player[4]}</td><td>{player[5]}</td><td>{player[6]}</td></tr>\n"
+        standings_rows += f"<tr><td>{rank}</td><td><a href='./{scorecard_link}'>{player[1]}</a></td><td>{player[3]}</td><td>{player[4]}</td><td>{player[5]}</td><td>{player[6]}</td></tr>\n"
     standings_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -658,7 +697,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </table>
     <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
-  {sponsor_footer()}
+  <footer class="bg-light"><div class="sponsor-banner">{sponsor_logos}</div>Direktor Scrabble Tournament Manager by Manuelito</footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -666,7 +705,6 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     standings_path = os.path.join(out_folder, standings_file)
     with open(standings_path, "w", encoding="utf-8") as f:
         f.write(standings_html)
-    # Build prize table page
     prize_rows = ""
     for prize in prize_table:
         if prize["prize_type"] == "Monetary":
@@ -687,7 +725,7 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </table>
     <a href="./index.html" class="btn btn-secondary">Back to Index</a>
   </div>
-  {sponsor_footer()}
+  <footer class="bg-light"><div class="sponsor-banner">{sponsor_logos}</div>Direktor Scrabble Tournament Manager by Manuelito</footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
@@ -695,7 +733,6 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     prize_path = os.path.join(out_folder, prize_file)
     with open(prize_path, "w", encoding="utf-8") as f:
         f.write(prize_html)
-    # Build main index page
     round_links_html = ""
     for r, link in pairing_round_links:
         round_links_html += f"<li class='list-group-item'><a href='./{link}'>Round {r} Pairings</a></li>\n"
@@ -717,12 +754,12 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     </div>
   </div>
 </nav>"""
-    footer_section = sponsor_footer() + '<footer class="bg-light">Direktor Scrabble Tournament Manager by Manuelito</footer>'
+    footer_section = f'<footer class="bg-light"><div class="sponsor-banner">{sponsor_logos}</div>Direktor Scrabble Tournament Manager by Manuelito</footer>'
     folder_name = re.sub(r'[\\/*?:"<>|]', "", tournament_name).replace(" ", "_")
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
-        shareable = f"{public_ip}/tournament/{folder_name}"
+        shareable = f"{public_ip}/tournaments/{folder_name}"
     else:
-        shareable = f"http://{public_ip}:{HTTP_PORT}/tournament/{folder_name}"
+        shareable = f"http://{public_ip}:{HTTP_PORT}/tournaments/{folder_name}"
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
 {header_html}
@@ -752,14 +789,6 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     with open(index_path, "w", encoding="utf-8") as f:
         f.write(index_html)
     return index_path
-
-# Helper function to generate sponsor footer if sponsor_logos is provided
-def sponsor_footer():
-    if sponsor_logos:
-        imgs = "".join([f"<img src='{url}' alt='Sponsor'>" for url in sponsor_logos])
-        return f"<div class='sponsor-banner'>{imgs}</div>"
-    else:
-        return ""
 
 ##################################
 # Flask Application for Coverage & Remote Results
@@ -990,7 +1019,7 @@ def setup_prize_table(tab_frame):
     def add_prize():
         name = prize_name_entry.get().strip()
         ptype = prize_type_var.get()
-        if name == "":
+        if not name:
             messagebox.showerror("Error", "Prize name is required.")
             return
         if ptype == "Monetary":
@@ -1066,12 +1095,9 @@ def open_event_index():
     rendered_dir = os.path.join(os.getcwd(), "rendered")
     relative_path = os.path.relpath(final_index, rendered_dir).replace(os.sep, '/')
     if not public_ip:
-        public_ip = "https://direktorexe.onrender.com"
-    # If a custom domain is used, assume it already includes http:// or https://
+        public_ip = "direktorexe.onrender.com"
     if public_ip.startswith("http://") or public_ip.startswith("https://"):
-        # Ensure the path uses the plural "tournaments" if that's how your Flask route is defined.
-        folder_name = re.sub(r'[\\/*?:"<>|]', "", tname).replace(" ", "_")
-        url = f"{public_ip}/tournaments/{folder_name}/index.html"
+        url = f"{public_ip}/{relative_path}"
     else:
         url = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
     webbrowser.open(url)
@@ -1208,7 +1234,7 @@ def setup_enter_results(tab_frame):
 # UI Functions: Tournament Setup Tab
 ##################################
 def setup_tournament_setup(tab_frame):
-    global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds, public_ip
+    global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds, public_ip, sponsor_logos
     label = ctk.CTkLabel(tab_frame, text="Set Up a New Tournament", font=("Arial", 18))
     label.pack(pady=10)
     tournament_name_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament name")
@@ -1217,6 +1243,8 @@ def setup_tournament_setup(tab_frame):
     tournament_date_entry.pack(pady=5)
     venue_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter tournament venue")
     venue_entry.pack(pady=5)
+    sponsor_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter sponsor logos HTML (optional)")
+    sponsor_entry.pack(pady=5)
     if current_mode_view == "team":
         team_size_var = ctk.StringVar(value="3")
         team_size_menu = ctk.CTkOptionMenu(tab_frame, variable=team_size_var, values=["3", "5"])
@@ -1224,10 +1252,11 @@ def setup_tournament_setup(tab_frame):
         team_names_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter team names (comma-separated)")
         team_names_entry.pack(pady=5)
     def create_tournament():
-        global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds, public_ip
+        global current_tournament_id, session_players, current_round_number, completed_rounds, tournament_mode, teams_list, team_size, last_pairing_system, last_team_size, current_mode_view, shareable_link, desired_rr_rounds, public_ip, sponsor_logos
         name = tournament_name_entry.get().strip()
         date = tournament_date_entry.get().strip()
         venue = venue_entry.get().strip()
+        sponsor_logos = sponsor_entry.get().strip()
         if not name or not date or not venue:
             show_toast(tab_frame, "Please enter valid tournament details, including venue.")
             return
@@ -1267,10 +1296,7 @@ def setup_tournament_setup(tab_frame):
                 "Enter the public IP or domain for players to access (leave blank to use the Render domain):")
             if not public_ip:
                 public_ip = "direktorexe.onrender.com"
-            if public_ip.startswith("http://") or public_ip.startswith("https://"):
-                shareable_link = f"{public_ip}/tournament/{re.sub(r'[\\/*?:"<>|]', '', name).replace(' ', '_')}"
-            else:
-                shareable_link = f"http://{public_ip}:{HTTP_PORT}/tournament/{re.sub(r'[\\/*?:"<>|]', '', name).replace(' ', '_')}"
+            shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
             update_tournament_link(tournament_id, shareable_link)
             show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
             print(f"Tournament '{name}' created with ID {tournament_id}. Link: {shareable_link}")
@@ -1281,13 +1307,14 @@ def setup_tournament_setup(tab_frame):
         tournament_name_entry.delete(0, 'end')
         tournament_date_entry.delete(0, 'end')
         venue_entry.delete(0, 'end')
+        sponsor_entry.delete(0, 'end')
         if current_mode_view == "team":
             team_names_entry.delete(0, 'end')
     create_button = ctk.CTkButton(tab_frame, text="Create Tournament", command=create_tournament)
     create_button.pack(pady=10)
 
 ##################################
-# UI Functions: Player Registration Tab (with Country Field and Player Number Reset)
+# UI Functions: Player Registration Tab
 ##################################
 def setup_player_registration(tab_frame):
     global current_tournament_id, session_players, tournament_mode, teams_list
@@ -1298,7 +1325,8 @@ def setup_player_registration(tab_frame):
     rating_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter rating (or 000 if unrated)")
     rating_entry.pack(pady=5)
     rating_entry.insert(0, "000")
-    country_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter country (optional)")
+    # New optional country field
+    country_entry = ctk.CTkEntry(tab_frame, placeholder_text="Enter country code (e.g., us) (optional)")
     country_entry.pack(pady=5)
     if tournament_mode == "Team Round Robin":
         team_var = ctk.StringVar()
@@ -1316,12 +1344,8 @@ def setup_player_registration(tab_frame):
         player_list_text.delete("1.0", "end")
         player_list_text.insert("end", "Registered Players (This Tournament):\n")
         for player in players:
-            team = player[8] if len(player) > 8 and player[8] else ""
-            country = player[10] if len(player) > 10 and player[10] else ""
-            flag = f" <img src='https://flagcdn.com/16x12/{country.lower()}.png' alt='{country}'>" if country else ""
-            display_name = f"{player[1]} (#{player[9]}){flag}"
-            if team:
-                display_name += f", {team}"
+            flag = f" <img src='https://flagcdn.com/16x12/{player[10].lower()}.png' alt='flag'>" if len(player) > 10 and player[10] else ""
+            display_name = f"{player[1]}{flag}"
             player_list_text.insert("end", f"{display_name} (Rating: {player[2]})\n")
         player_list_text.configure(state="disabled")
     def register_player():
@@ -1331,7 +1355,6 @@ def setup_player_registration(tab_frame):
             return
         name = name_entry.get().strip()
         rating_str = rating_entry.get().strip()
-        country = country_entry.get().strip()
         try:
             rating = int(rating_str) if rating_str and rating_str.isdigit() else 0
         except ValueError:
@@ -1339,16 +1362,17 @@ def setup_player_registration(tab_frame):
         if not name:
             show_toast(tab_frame, "Please enter a valid name!")
             return
+        country = country_entry.get().strip()
         team = ""
         if tournament_mode == "Team Round Robin":
             team = team_var.get()
             if team in ("No Teams Defined", ""):
                 show_toast(tab_frame, "Please select a team.")
                 return
+        conn = create_connection()
         players = get_players_for_tournament(current_tournament_id)
         next_player_number = len(players) + 1
-        conn = create_connection()
-        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team, next_player_number, country)
+        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team, next_player_number)
         conn.close()
         show_toast(tab_frame, f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
         print(f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
@@ -1536,7 +1560,7 @@ def flask_index():
     else:
         abort(404, "No tournament coverage found.")
 
-@flask_app.route("/tournaments/<tournament_name>")
+@flask_app.route("/tournament/<tournament_name>")
 def flask_tournament_index(tournament_name):
     folder = os.path.join("rendered", "tournaments", tournament_name)
     if os.path.exists(os.path.join(folder, "index.html")):
@@ -1544,17 +1568,13 @@ def flask_tournament_index(tournament_name):
     else:
         abort(404, f"Tournament '{tournament_name}' not found.")
 
-@flask_app.route("/tournaments/<path:subpath>")
-def flask_tournament_static(subpath):
-    parts = subpath.split("/", 1)
-    tournament_name = parts[0]
-    filename = parts[1] if len(parts) > 1 else "index.html"
+@flask_app.route("/tournament/<tournament_name>/<path:filename>")
+def flask_tournament_files(tournament_name, filename):
     folder = os.path.join("rendered", "tournaments", tournament_name)
     if os.path.exists(os.path.join(folder, filename)):
         return send_from_directory(folder, filename)
     else:
         abort(404, f"File '{filename}' not found in tournament '{tournament_name}'.")
-
 
 @flask_app.route("/submit_results", methods=["GET", "POST"])
 def flask_submit_results():
@@ -1728,6 +1748,7 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
     
+    # Build the main tab view
     def build_tab_view(parent):
         if current_mode_view == "general":
             tabs = ["Tournament Setup", "Player Registration", "Pairings", "Enter Results", "Prize Table", "Reports & Exports", "Render", "FTP Settings"]
