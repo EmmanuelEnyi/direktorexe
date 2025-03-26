@@ -41,11 +41,14 @@ import tkinter.filedialog as fd
 import tkinter.messagebox as messagebox
 import tkinter.simpledialog as simpledialog
 from functools import partial
-from data.database import create_connection, create_tables, insert_player, insert_tournament, get_all_tournaments, get_all_players, get_players_for_tournament
+from data.database import create_connection, create_tables
+from database import insert_tournament, update_tournament_link, get_tournament, get_all_tournaments, insert_player, get_players_for_tournament
+from schema import initialize_database
 from pairings import round_robin_rounds, assign_firsts, random_pairings, king_of_the_hills_pairings, australian_draw_pairings, lagged_australian_pairings
 from theme import set_theme_mode, apply_theme
 from utils import get_local_ip, get_tournament_folder, recalculate_player_stats
 from server import run_flask_app
+from database_utils import execute_query
 
 # Import all currencies
 all_currencies = [
@@ -228,12 +231,21 @@ def update_status():
     global status_label, current_tournament_id
     if status_label:
         if current_tournament_id is not None:
-            conn = create_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM tournaments WHERE id = ?", (current_tournament_id,))
-            result = cursor.fetchone()
-            conn.close()
-            status_label.configure(text=result[0] if result else "No tournament loaded.")
+            # Update the update_status function to use the new database functions
+            # Find the function update_status()
+            # Look for these lines:
+            #conn = create_connection()
+            #cursor = conn.cursor()
+            #cursor.execute("SELECT name FROM tournaments WHERE id = ?", (current_tournament_id,))
+            #result = cursor.fetchone()
+            #conn.close()
+
+            # Replace with:
+            result = get_tournament(current_tournament_id)
+            if result:
+                status_label.configure(text=result[1])
+            else:
+                status_label.configure(text="No tournament loaded.")
         else:
             status_label.configure(text="No tournament loaded.")
 
@@ -570,10 +582,10 @@ def generate_tournament_html(tournament_id, tournament_name, tournament_date):
     <p class="lead">{tournament_date_db} | {tournament_venue}</p>
     <h2 class="mt-4">Event Coverage Index</h2>
     <ul class="list-group">
-      <li class="list-group-item"><a href="./{roster_file}">Player Roster</a></li>
+      <li class="list-group-item"><a href="{shareable}/{roster_file}">Player Roster</a></li>
       {round_links_html}
-      <li class="list-group-item"><a href="./{standings_file}">Standings</a></li>
-      <li class="list-group-item"><a href="./{prize_file}">Prize Table</a></li>
+      <li class="list-group-item"><a href="{shareable}/{standings_file}">Standings</a></li>
+      <li class="list-group-item"><a href="{shareable}/{prize_file}">Prize Table</a></li>
     </ul>
     <br>
     <a href="/submit_results" class="btn btn-primary">Submit Results</a>
@@ -641,16 +653,51 @@ def recalc_player_stats():
     if current_tournament_id is None:
         return
     
-    conn = create_connection()
-    cursor = conn.cursor()
+    # Update the recalc_player_stats function to use the new database functions
+    # This is a more complex function, so we'll need to make several changes
+    # Find the function recalc_player_stats()
+
+    # First, replace the connection creation:
+    #conn = create_connection()
+    #cursor = conn.cursor()
+
+    # With:
+    #from database_utils import execute_query
+
+    # Then, replace all cursor.execute calls with execute_query
+    # For example, replace:
+    #cursor.execute("""
+    #    UPDATE players 
+    #    SET wins = 0, losses = 0, spread = 0, last_result = '', scorecard = '[]'
+    #    WHERE id = ?
+    #""", (player_id,))
+
+    # With:
+    #execute_query("""
+    #    UPDATE players 
+    #    SET wins = 0, losses = 0, spread = 0, last_result = '', scorecard = '[]'
+    #    WHERE id = ?
+    #""", (player_id,))
+
+    # And replace:
+    #cursor.execute("SELECT id FROM players WHERE name = ? AND tournament_id = ?", (p1_name, current_tournament_id))
+    #p1_id_result = cursor.fetchone()
+
+    # With:
+    #p1_id_result = execute_query("SELECT id FROM players WHERE name = ? AND tournament_id = ?", 
+    #                        (p1_name, current_tournament_id), fetch="one")
+
+    # Finally, remove the conn.commit() and conn.close() calls at the end of the function
     
+    from database_utils import execute_query
+
     # Get all players for the current tournament
     players = get_players_for_tournament(current_tournament_id)
     
     # Reset player stats
     for player in players:
         player_id = player[0]
-        cursor.execute("""
+        execute_query("""
             UPDATE players 
             SET wins = 0, losses = 0, spread = 0, last_result = '', scorecard = '[]'
             WHERE id = ?
@@ -673,10 +720,10 @@ def recalc_player_stats():
                 continue
                 
             # Find player IDs
-            cursor.execute("SELECT id FROM players WHERE name = ? AND tournament_id = ?", (p1_name, current_tournament_id))
-            p1_id_result = cursor.fetchone()
-            cursor.execute("SELECT id FROM players WHERE name = ? AND tournament_id = ?", (p2_name, current_tournament_id))
-            p2_id_result = cursor.fetchone()
+            p1_id_result = execute_query("SELECT id FROM players WHERE name = ? AND tournament_id = ?", 
+                                        (p1_name, current_tournament_id), fetch="one")
+            p2_id_result = execute_query("SELECT id FROM players WHERE name = ? AND tournament_id = ?", 
+                                        (p2_name, current_tournament_id), fetch="one")
             
             if not p1_id_result or not p2_id_result:
                 continue
@@ -687,21 +734,21 @@ def recalc_player_stats():
             # Update player 1 stats
             if score1 > score2:
                 # Win
-                cursor.execute("""
+                execute_query("""
                     UPDATE players 
                     SET wins = wins + 1, spread = spread + ?, last_result = ?
                     WHERE id = ?
                 """, (score1 - score2, f"W {score1}-{score2}", p1_id))
             elif score1 < score2:
                 # Loss
-                cursor.execute("""
+                execute_query("""
                     UPDATE players 
                     SET losses = losses + 1, spread = spread - ?, last_result = ?
                     WHERE id = ?
                 """, (score2 - score1, f"L {score1}-{score2}", p1_id))
             else:
                 # Tie
-                cursor.execute("""
+                execute_query("""
                     UPDATE players 
                     SET wins = wins + 0.5, losses = losses + 0.5, last_result = ?
                     WHERE id = ?
@@ -710,24 +757,23 @@ def recalc_player_stats():
             # Update player 2 stats
             if score2 > score1:
                 # Win
-                cursor.execute("""
+                execute_query("""
                     UPDATE players 
                     SET wins = wins + 1, spread = spread + ?, last_result = ?
                     WHERE id = ?
                 """, (score2 - score1, f"W {score2}-{score1}", p2_id))
             elif score2 < score1:
                 # Loss
-                cursor.execute("""
+                execute_query("""
                     UPDATE players 
                     SET losses = losses + 1, spread = spread - ?, last_result = ?
                     WHERE id = ?
                 """, (score1 - score2, f"L {score2}-{score1}", p2_id))
             else:
                 # Tie
-                cursor.execute("""
+                execute_query("""
                     UPDATE players 
                     SET wins = wins + 0.5, losses = losses + 0.5, last_result = ?
-                    WHERE id = ?
                 """, (f"T {score2}-{score1}", p2_id))
     
     # Update scorecards
@@ -790,14 +836,14 @@ def recalc_player_stats():
                     })
         
         # Update scorecard in database
-        cursor.execute("""
+        execute_query("""
             UPDATE players 
             SET scorecard = ?
             WHERE id = ?
         """, (json.dumps(scorecard), player_id))
     
-    conn.commit()
-    conn.close()
+    #conn.commit()
+    #conn.close()
 
 ##################################
 # UI Functions: Sponsor Logos Tab
@@ -1119,9 +1165,15 @@ def setup_tournament_setup(tab_frame):
         team_size = 0
         last_pairing_system = "Round Robin"
         desired_rr_rounds = None
-        conn = create_connection()
-        tournament_id = insert_tournament(conn, name, date, venue)
-        conn.close()
+        # Update the create_tournament function to use the new database functions
+        # Find the function create_tournament() in the setup_tournament_setup function
+        # Look for these lines:
+        #conn = create_connection()
+        #tournament_id = insert_tournament(conn, name, date, venue)
+        #conn.close()
+
+        # Replace with:
+        tournament_id = insert_tournament(None, name, date, venue)
         if tournament_id:
             current_tournament_id = tournament_id
             session_players = []
@@ -1219,10 +1271,10 @@ def setup_player_registration(tab_frame):
             show_toast(tab_frame, "Please enter a valid name!")
             return
         team = ""
-        conn = create_connection()
+        #conn = create_connection()
         # Updated insert_player to accept country (as full country name)
-        tournament_specific_id = insert_player(conn, name, rating, current_tournament_id, team, country)
-        conn.close()
+        tournament_specific_id = insert_player(None, name, rating, current_tournament_id, team, country)
+        #conn.close()
         show_toast(tab_frame, f"Player '{name}' registered with tournament ID {tournament_specific_id}.")
         name_entry.delete(0, 'end')
         rating_entry.delete(0, 'end')
@@ -1418,6 +1470,7 @@ if __name__ == "__main__":
     main_frame_global = ctk.CTkFrame(app)
     main_frame_global.grid(row=0, column=1, sticky="nsew")
     
+    from schema import initialize_database
     initialize_database()
     
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
