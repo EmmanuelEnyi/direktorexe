@@ -106,18 +106,17 @@ sponsor_logos = ""  # Holds sponsor logo file paths
 #  </style>
 #</head>"""
 
-# Replace the header_html variable definition with this function
 def get_header_html(base_href):
-    return f"""<head>
+    return """<head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <base href="{base_href}">
+  <base href=\"""" + base_href + """\">
   <title>Tournament</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    body {{ background-color: #f8f9fa; color: #343a40; }}
-    .container-custom {{ max-width:800px; margin:auto; }}
-    footer {{ margin-top: 40px; font-size: 0.9em; text-align: center; padding: 20px 0; }}
+    body { background-color: #f8f9fa; color: #343a40; }
+    .container-custom { max-width:800px; margin:auto; }
+    footer { margin-top: 40px; font-size: 0.9em; text-align: center; padding: 20px 0; }
   </style>
 </head>"""
 
@@ -1133,20 +1132,16 @@ def setup_tournament_setup(tab_frame):
             final_file = finalize_tournament_html(name, generated_file)
             rendered_dir = os.path.join(os.getcwd(), "rendered")
             relative_path = os.path.relpath(final_file, rendered_dir).replace(os.sep, '/')
+
+            # Create folder name for URLs
+            folder_name = re.sub(r'[\\/*?:"<>|]', "", name).replace(" ", "_")
+            
             if connection_type_var.get() == "Local IP":
                 public_ip = get_local_ip()
-                shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
+                shareable_link = f"http://{public_ip}:{HTTP_PORT}/tournaments/{folder_name}"
             elif connection_type_var.get() == "Render URL":
-                render_domain = simpledialog.askstring("Render Domain", "Enter your Render domain (e.g., myapp.onrender.com):")
-                if render_domain:
-                    public_ip = f"https://{render_domain}"
-                    # Make sure the URL doesn't have double slashes
-                    shareable_link = f"{public_ip}/tournament/{folder_name}"
-                    messagebox.showinfo("Render URL", f"Using Render URL: {shareable_link}\n\nMake sure your Render service is configured to serve static files and the files are uploaded to the correct location.")
-                else:
-                    # Fallback to local IP if no domain provided
-                    public_ip = get_local_ip()
-                    shareable_link = f"http://{public_ip}:{HTTP_PORT}/{relative_path}"
+                public_ip = "http://direktorexe.onrender.com"
+                shareable_link = f"{public_ip}/tournaments/{folder_name}"
             elif connection_type_var.get() == "FTP":
                 ftp_host = simpledialog.askstring("FTP Host", "Enter FTP host:")
                 ftp_user = simpledialog.askstring("FTP Username", "Enter FTP username:")
@@ -1157,10 +1152,11 @@ def setup_tournament_setup(tab_frame):
                         shareable_link = new_link
                     else:
                         public_ip = "http://direktorexe.onrender.com"
-                        shareable_link = f"{public_ip}/{relative_path}"
+                        shareable_link = f"{public_ip}/tournaments/{folder_name}"
                 else:
                     public_ip = "http://direktorexe.onrender.com"
-                    shareable_link = f"{public_ip}/{relative_path}"
+                    shareable_link = f"{public_ip}/tournaments/{folder_name}"
+
             update_tournament_link(tournament_id, shareable_link)
             show_toast(tab_frame, f"Tournament '{name}' created. Link: {shareable_link}")
             update_status()
