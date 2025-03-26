@@ -1,3 +1,9 @@
+"""
+database_utils.py - Database utility functions for Direktor EXE Scrabble Tournament Manager
+
+This module provides database connection and query execution utilities.
+"""
+
 import os
 import sqlite3
 import psycopg2
@@ -29,13 +35,19 @@ def execute_query(query, params=None, fetch=None):
     try:
         if isinstance(conn, sqlite3.Connection):
             cursor = conn.cursor()
+            # For SQLite, replace RETURNING with a separate SELECT
+            if "RETURNING" in query:
+                # Execute the insert without RETURNING
+                insert_query = query.split("RETURNING")[0]
+                cursor.execute(insert_query, params)
+                # Get the last inserted ID
+                cursor.execute("SELECT last_insert_rowid()")
+                result = cursor.fetchone()
+                conn.commit()
+                return result
         else:
             cursor = conn.cursor(cursor_factory=DictCursor)
-        
-        if params:
             cursor.execute(query, params)
-        else:
-            cursor.execute(query)
             
         if fetch == "one":
             result = cursor.fetchone()
@@ -53,3 +65,4 @@ def execute_query(query, params=None, fetch=None):
     finally:
         if conn:
             conn.close()
+

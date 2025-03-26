@@ -382,5 +382,15 @@ def run_flask_app():
     app.run(host="0.0.0.0", port=PORT, debug=False)
 
 if __name__ == "__main__":
-    run_flask_app()
+    print("Starting Flask server directly...")
+    # Try to initialize the database if possible
+    try:
+        from schema import initialize_database
+        print("Initializing database...")
+        initialize_database()
+    except ImportError:
+        print("Could not import initialize_database, skipping database initialization")
+    
+    # Run the Flask app directly
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), debug=False)
 
