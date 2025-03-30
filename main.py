@@ -42,7 +42,7 @@ import tkinter.messagebox as messagebox
 import tkinter.simpledialog as simpledialog
 from functools import partial
 from data.database import create_connection, create_tables
-from database import insert_tournament, update_tournament_link, get_tournament, get_all_tournaments, insert_player, get_players_for_tournament
+from data.database import insert_tournament, update_tournament_link, get_tournament, get_all_tournaments, insert_player, get_players_for_tournament
 from schema import initialize_database
 from pairings import round_robin_rounds, assign_firsts, random_pairings, king_of_the_hills_pairings, australian_draw_pairings, lagged_australian_pairings
 from theme import set_theme_mode, apply_theme

@@ -1,6 +1,22 @@
+"""
+database.py - Database operations for Direktor EXE Scrabble Tournament Manager
+
+This module provides functions for interacting with the tournament database.
+"""
+
 from database_utils import execute_query
 
-def insert_tournament(name, date, venue):
+def create_connection():
+    """Legacy function for backward compatibility."""
+    from database_utils import get_db_connection
+    return get_db_connection()
+
+def create_tables(conn):
+    """Legacy function for backward compatibility."""
+    from schema import initialize_database
+    initialize_database()
+
+def insert_tournament(conn, name, date, venue):
     """Insert a new tournament into the database."""
     query = """
     INSERT INTO tournaments (name, date, venue)
@@ -37,7 +53,7 @@ def get_all_tournaments():
     """
     return execute_query(query, fetch="all")
 
-def insert_player(name, rating, tournament_id, team="", country=""):
+def insert_player(conn, name, rating, tournament_id, team="", country=""):
     """Insert a new player into the database."""
     query = """
     INSERT INTO players (name, rating, tournament_id, team, country)
@@ -65,3 +81,4 @@ def update_player_stats(player_id, wins, losses, spread, last_result, scorecard)
     WHERE id = ?
     """
     execute_query(query, (wins, losses, spread, last_result, scorecard, player_id))
+
